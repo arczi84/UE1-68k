@@ -147,6 +147,36 @@ void UEditorEngine::Init()
 				}
 			}
 		}
+
+		// Update one UnrealScript class inside an existing content package
+		// without rebuilding (and losing) the package's imported assets.
+		// Example:
+		//   Unreal.bin -make -PATCHCLASS=../UnrealI/Classes/MyMenu.uc
+		//              -PATCHPACKAGE=UnrealI -PATCHNAME=MyMenu
+		char PatchFile[256], PatchPackage[NAME_SIZE], PatchName[NAME_SIZE];
+		if
+		(	Parse( appCmdLine(), "PATCHCLASS=", PatchFile, ARRAY_COUNT(PatchFile) )
+		&&	Parse( appCmdLine(), "PATCHPACKAGE=", PatchPackage, ARRAY_COUNT(PatchPackage) )
+		&&	Parse( appCmdLine(), "PATCHNAME=", PatchName, ARRAY_COUNT(PatchName) ) )
+		{
+			UPackage* PkgObject = GObj.CreatePackage( NULL, PatchPackage );
+			UClass* PatchedClass = ImportObjectFromFile<UClass>
+			(
+				PkgObject,
+				FName(PatchName,FNAME_Add),
+				PatchFile,
+				GSystem
+			);
+			if( !PatchedClass )
+				appErrorf( "Failed to import class %s from %s", PatchName, PatchFile );
+			if( !MakeScripts( 0, 0 ) )
+				appErrorf( "Failed to compile patched class %s", PatchName );
+
+			char Filename[256];
+			appSprintf( Filename, "%s.u", PatchPackage );
+			GObj.SavePackage( PkgObject, NULL, RF_Standalone, Filename );
+			debugf( NAME_Log, "Patched class %s in %s", PatchName, Filename );
+		}
 		GIsRequestingExit=1;
 	}
 	else

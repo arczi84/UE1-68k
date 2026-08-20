@@ -156,6 +156,12 @@ struct FTexSetup
 	INT  	X;
 	void*   CoSetup;
 	FMMX	Tex, Lit;
+#ifdef PLATFORM_AMIGA
+	// Keep light coordinates uncombined on m68k.  The old Pentium path packs
+	// U and V into one 64-bit accumulator, which produces sporadic bad texel
+	// addresses on big endian even when LightOS is disabled.
+	INT     LitU, LitV;
+#endif
 
 	//void InitMipMMX( FMipSetup* Mip )
 	//{
@@ -172,6 +178,10 @@ struct FTexSetup
 
 	void InitLightPentium( DWORD U, DWORD V )
 	{
+#ifdef PLATFORM_AMIGA
+		LitU = (INT)U;
+		LitV = (INT)V;
+#endif
 		DWORD VRotated = _rotl(V, LightMip.LVShift);
 		Lit.DL = VRotated;
 		Lit.DH = ((U<<LightMip.HUShift)& LightMip.RMask.DH) + ( VRotated & LightMip.Mask.DH );
@@ -179,6 +189,10 @@ struct FTexSetup
 
 	void InitLightPentiumDelta( DWORD U, DWORD V )
 	{
+#ifdef PLATFORM_AMIGA
+		LitU = (INT)U;
+		LitV = (INT)V;
+#endif
 		DWORD VRotated = _rotl(V, LightMip.LVShift);
 		Lit.DL = VRotated;
 		Lit.DH = ((U<<LightMip.HUShift)&  LightMip.RMask.DH) + ( VRotated & LightMip.Mask.DH );
@@ -245,7 +259,25 @@ union FTexSetupUnion
 #define PALSHADES_R  64+4  // All + 4 for dithering elbowspace.
 #define PALSHADES_G  64+4
 #define PALSHADES_B  64+4
-#define LIGHTSHADES 128
+// Number of distinct light levels in the Shade LUT, and how many low bits of a
+// light sample are dropped to get there.  The table is LIGHTSHADES*256 bytes.
+//
+// Shrinking this from 32K (128 shades) to 8K (32 shades) so it fits the 68060
+// data cache measured 34.24 -> 34.10 FPS, but that was taken on a throttled
+// emulator run whose spread turned out to be +/-1.3 FPS, so the result was
+// inside the noise and proved nothing either way.  Worth re-measuring on a
+// stable full-JIT setup before drawing any conclusion.
+//
+// 0 = 128 shades / 32K (original), 1 = 64 / 16K, 2 = 32 / 8K.  Coarser shading
+// is visible as banding on large smoothly-lit surfaces.
+// Override from the build with -DLIGHTSHADEBITS=n.
+#ifndef LIGHTSHADEBITS
+#define LIGHTSHADEBITS 0
+#endif
+#define LIGHTSHADES (128 >> LIGHTSHADEBITS)
+// Mask applied to each byte of a packed light sample, keeping it in range.
+#define LIGHTMASKBYTE (0x7f >> LIGHTSHADEBITS)
+#define LIGHTMASK3 ( (LIGHTMASKBYTE<<16) | (LIGHTMASKBYTE<<8) | LIGHTMASKBYTE )
 #define SHADE_G  ( 0 )
 #define SHADE_R  ( PALSHADES_G  )
 #define SHADE_B  ( PALSHADES_G  +  PALSHADES_R )
@@ -340,6 +372,283 @@ static DWORD        TexSetup;
 // Sampled light values for a span.
 static FMMX         Photon[ MaximumXScreenSize * 2 ];  //!!crashes at resolutions above 1600
 
+#if SOFTDRV_LIGHT_TRACE
+// Bounded diagnostic shared by the Amiga and Linux/PPC builds. It records
+// hashes and ranges at lightmap sampling and at the final RGB565 merge.
+static FILE* GSoftLightTraceFile = NULL;
+static INT   GSoftLightTraceFrame = 0;
+static INT   GSoftLightTraceActive = 0;
+static DWORD GSoftLightSampleCount = 0;
+static DWORD GSoftLightSampleHash = 2166136261u;
+static DWORD GSoftLightIndexHash = 2166136261u;
+static DWORD GSoftLightMin = 0x00ffffffu;
+static DWORD GSoftLightMax = 0;
+static DWORD GSoftLightHighR = 0;
+static DWORD GSoftLightHighG = 0;
+static DWORD GSoftLightHighB = 0;
+static DWORD GSoftLightOutputCount = 0;
+static DWORD GSoftLightOutputHash = 2166136261u;
+static DWORD GSoftLightOutputMin = 0x00ffffffu;
+static DWORD GSoftLightOutputMax = 0;
+static DWORD GSoftMergeCount = 0;
+static DWORD GSoftMergeHash = 2166136261u;
+static DWORD GSoftMergeTexHash = 2166136261u;
+static DWORD GSoftMergeLightHash = 2166136261u;
+static DWORD GSoftSurfaceCount = 0;
+static INT   GSoftPassKind = 0;
+static DWORD GSoftPassCount[5];
+static DWORD GSoftPassTexHash[5];
+static DWORD GSoftPassLightHash[5];
+static DWORD GSoftPassPixelHash[5];
+
+enum
+{
+	SOFT_TRACE_FRAMES = 32,
+	SOFT_TRACE_SAMPLES_PER_FRAME = 16384,
+	SOFT_TRACE_OUTPUTS_PER_FRAME = 8192,
+	SOFT_TRACE_MERGES_PER_FRAME = 32768
+};
+
+static inline DWORD SoftTraceHash( DWORD Hash, DWORD Value )
+{
+	Hash ^= Value;
+	return Hash * 16777619u;
+}
+
+void SoftLightTraceBeginFrame( INT Frame, INT Width, INT Height, INT ColorBytes, DWORD Caps )
+{
+	if( !GSoftLightTraceFile )
+	{
+#ifdef PLATFORM_AMIGA
+		GSoftLightTraceFile = fopen( "PROGDIR:soft-light-trace-v2.log", "w" );
+#else
+		GSoftLightTraceFile = fopen( "soft-light-trace-v2.log", "w" );
+#endif
+		debugf
+		(
+			NAME_Init,
+			"SoftLightTrace: BeginFrame=%i open=%s",
+			Frame,
+			GSoftLightTraceFile ? "OK" : "FAILED"
+		);
+		if( GSoftLightTraceFile )
+		{
+			FMMX Layout;
+			Layout.Q = 0;
+			Layout.R = 0x1111;
+			Layout.G = 0x2222;
+			Layout.B = 0x3333;
+			Layout.A = 0x4444;
+			fprintf
+			(
+				GSoftLightTraceFile,
+				"SOFTLIGHT v1 platform=%s endian=%s sizeof_FMMX=%lu layout_DH=%08lx layout_DL=%08lx bytes=%02x,%02x,%02x,%02x,%02x,%02x,%02x,%02x\n",
+#ifdef PLATFORM_AMIGA
+				"amiga68k",
+#elif defined(PLATFORM_PPC)
+				"linux-ppc",
+#else
+				"linux",
+#endif
+#if __INTEL_BYTE_ORDER__
+				"little",
+#else
+				"big",
+#endif
+				(unsigned long)sizeof(FMMX),
+				(unsigned long)Layout.DH,
+				(unsigned long)Layout.DL,
+				((BYTE*)&Layout)[0], ((BYTE*)&Layout)[1],
+				((BYTE*)&Layout)[2], ((BYTE*)&Layout)[3],
+				((BYTE*)&Layout)[4], ((BYTE*)&Layout)[5],
+				((BYTE*)&Layout)[6], ((BYTE*)&Layout)[7]
+			);
+		}
+	}
+
+	GSoftLightTraceFrame = Frame;
+	GSoftLightTraceActive = GSoftLightTraceFile && Frame <= SOFT_TRACE_FRAMES;
+	if( !GSoftLightTraceActive )
+		return;
+
+	GSoftLightSampleCount = 0;
+	GSoftLightSampleHash = 2166136261u;
+	GSoftLightIndexHash = 2166136261u;
+	GSoftLightMin = 0x00ffffffu;
+	GSoftLightMax = 0;
+	GSoftLightHighR = GSoftLightHighG = GSoftLightHighB = 0;
+	GSoftLightOutputCount = 0;
+	GSoftLightOutputHash = 2166136261u;
+	GSoftLightOutputMin = 0x00ffffffu;
+	GSoftLightOutputMax = 0;
+	GSoftMergeCount = 0;
+	GSoftMergeHash = 2166136261u;
+	GSoftMergeTexHash = 2166136261u;
+	GSoftMergeLightHash = 2166136261u;
+	GSoftSurfaceCount = 0;
+	for( INT I=0; I<5; I++ )
+	{
+		GSoftPassCount[I] = 0;
+		GSoftPassTexHash[I] = 2166136261u;
+		GSoftPassLightHash[I] = 2166136261u;
+		GSoftPassPixelHash[I] = 2166136261u;
+	}
+	fprintf
+	(
+		GSoftLightTraceFile,
+		"BEGIN frame=%ld size=%ldx%ld bytes=%ld rgb565=%ld\n",
+		(long)Frame, (long)Width, (long)Height, (long)ColorBytes,
+		(long)((Caps & CC_RGB565) != 0)
+	);
+}
+
+static inline void SoftLightTraceOutput( DWORD Coordinate, DWORD Result )
+{
+	if( !GSoftLightTraceActive )
+		return;
+	Result &= 0x00ffffffu;
+	GSoftLightOutputCount++;
+	if( GSoftLightOutputCount > SOFT_TRACE_OUTPUTS_PER_FRAME )
+		return;
+	GSoftLightOutputHash = SoftTraceHash( SoftTraceHash(GSoftLightOutputHash, Coordinate), Result );
+	if( Result < GSoftLightOutputMin ) GSoftLightOutputMin = Result;
+	if( Result > GSoftLightOutputMax ) GSoftLightOutputMax = Result;
+	if( GSoftLightOutputCount <= 8 )
+		fprintf
+		(
+			GSoftLightTraceFile,
+			"L frame=%ld n=%lu coordinate=%08lx result=%06lx\n",
+			(long)GSoftLightTraceFrame,
+			(unsigned long)GSoftLightOutputCount,
+			(unsigned long)Coordinate,
+			(unsigned long)Result
+		);
+}
+
+static inline void SoftLightTraceSample( DWORD Index, DWORD Raw, DWORD Result )
+{
+	if( !GSoftLightTraceActive )
+		return;
+	Raw &= 0x00ffffffu;
+	Result &= 0x00ffffffu;
+	GSoftLightSampleCount++;
+	if( GSoftLightSampleCount > SOFT_TRACE_SAMPLES_PER_FRAME )
+		return;
+	GSoftLightIndexHash = SoftTraceHash( GSoftLightIndexHash, Index );
+	GSoftLightSampleHash = SoftTraceHash( GSoftLightSampleHash, Result );
+	if( Result < GSoftLightMin ) GSoftLightMin = Result;
+	if( Result > GSoftLightMax ) GSoftLightMax = Result;
+	if( Raw & 0x000080u ) GSoftLightHighR++;
+	if( Raw & 0x008000u ) GSoftLightHighG++;
+	if( Raw & 0x800000u ) GSoftLightHighB++;
+	if( GSoftLightSampleCount <= 8 )
+		fprintf
+		(
+			GSoftLightTraceFile,
+			"S frame=%ld n=%lu index=%08lx raw=%06lx result=%06lx\n",
+			(long)GSoftLightTraceFrame,
+			(unsigned long)GSoftLightSampleCount,
+			(unsigned long)Index,
+			(unsigned long)Raw,
+			(unsigned long)Result
+		);
+}
+
+static inline void SoftLightTraceMerge( DWORD Tex, DWORD Lit, _WORD Pixel )
+{
+	if( !GSoftLightTraceActive )
+		return;
+	const INT Pass = Clamp( GSoftPassKind, 0, 4 );
+	if( GSoftPassCount[Pass] < SOFT_TRACE_MERGES_PER_FRAME / 4 )
+	{
+		GSoftPassTexHash[Pass] = SoftTraceHash( GSoftPassTexHash[Pass], Tex & 0x00ffffffu );
+		GSoftPassLightHash[Pass] = SoftTraceHash( GSoftPassLightHash[Pass], Lit & 0x00ffffffu );
+		GSoftPassPixelHash[Pass] = SoftTraceHash( GSoftPassPixelHash[Pass], (DWORD)Pixel );
+	}
+	GSoftPassCount[Pass]++;
+	GSoftMergeCount++;
+	if( GSoftMergeCount > SOFT_TRACE_MERGES_PER_FRAME )
+		return;
+	GSoftMergeTexHash = SoftTraceHash( GSoftMergeTexHash, Tex & 0x00ffffffu );
+	GSoftMergeLightHash = SoftTraceHash( GSoftMergeLightHash, Lit & 0x00ffffffu );
+	GSoftMergeHash = SoftTraceHash( GSoftMergeHash, (DWORD)Pixel );
+}
+
+static inline void SoftLightTraceSetPass( INT Pass )
+{
+	GSoftPassKind = Pass;
+}
+
+static inline void SoftLightTraceSurface( const FSurfaceInfo& Surface )
+{
+	if( !GSoftLightTraceActive || !Surface.LightMap || GSoftSurfaceCount >= 96 )
+		return;
+	FMipmap* Mip = Surface.LightMap->Mips[0];
+	if( !Mip || !Mip->DataPtr )
+		return;
+	DWORD Hash = 2166136261u;
+	const BYTE* Data = (const BYTE*)Mip->DataPtr;
+	for( INT V=0; V<Surface.LightMap->VClamp; V++ )
+		for( INT U=0; U<Surface.LightMap->UClamp*4; U++ )
+			Hash = SoftTraceHash( Hash, Data[V*Mip->USize*4 + U] );
+	GSoftSurfaceCount++;
+	fprintf
+	(
+		GSoftLightTraceFile,
+		"M frame=%ld n=%lu flags=%08lx usize=%ld vsize=%ld uclamp=%ld vclamp=%ld hash=%08lx first=%02x,%02x,%02x,%02x\n",
+		(long)GSoftLightTraceFrame, (unsigned long)GSoftSurfaceCount,
+		(unsigned long)Surface.PolyFlags, (long)Mip->USize, (long)Mip->VSize,
+		(long)Surface.LightMap->UClamp, (long)Surface.LightMap->VClamp,
+		(unsigned long)Hash, Data[0], Data[1], Data[2], Data[3]
+	);
+}
+
+void SoftLightTraceEndFrame()
+{
+	if( !GSoftLightTraceActive )
+		return;
+	fprintf
+	(
+		GSoftLightTraceFile,
+		"END frame=%ld samples=%lu index_hash=%08lx raw_hash=%08lx raw_min=%06lx raw_max=%06lx raw_high_rgb=%lu,%lu,%lu light_outputs=%lu light_hash=%08lx light_min=%06lx light_max=%06lx merges=%lu tex_hash=%08lx merge_light_hash=%08lx rgb565_hash=%08lx\n",
+		(long)GSoftLightTraceFrame,
+		(unsigned long)GSoftLightSampleCount,
+		(unsigned long)GSoftLightIndexHash,
+		(unsigned long)GSoftLightSampleHash,
+		(unsigned long)GSoftLightMin,
+		(unsigned long)GSoftLightMax,
+		(unsigned long)GSoftLightHighR,
+		(unsigned long)GSoftLightHighG,
+		(unsigned long)GSoftLightHighB,
+		(unsigned long)GSoftLightOutputCount,
+		(unsigned long)GSoftLightOutputHash,
+		(unsigned long)GSoftLightOutputMin,
+		(unsigned long)GSoftLightOutputMax,
+		(unsigned long)GSoftMergeCount,
+		(unsigned long)GSoftMergeTexHash,
+		(unsigned long)GSoftMergeLightHash,
+		(unsigned long)GSoftMergeHash
+	);
+	for( INT I=0; I<5; I++ )
+		fprintf
+		(
+			GSoftLightTraceFile,
+			"P frame=%ld kind=%ld count=%lu tex_hash=%08lx light_hash=%08lx pixel_hash=%08lx\n",
+			(long)GSoftLightTraceFrame, (long)I, (unsigned long)GSoftPassCount[I],
+			(unsigned long)GSoftPassTexHash[I], (unsigned long)GSoftPassLightHash[I],
+			(unsigned long)GSoftPassPixelHash[I]
+		);
+	fflush( GSoftLightTraceFile );
+	GSoftLightTraceActive = 0;
+}
+#else
+#define SoftLightTraceSample(Index,Raw,Result) do { } while(0)
+#define SoftLightTraceOutput(Coordinate,Result) do { } while(0)
+#define SoftLightTraceMerge(Tex,Lit,Pixel) do { } while(0)
+#define SoftLightTraceSurface(Surface) do { } while(0)
+#define SoftLightTraceSetPass(Pass) do { } while(0)
+#endif
+
 
 // NonMMX stuff.
 static BYTE         Shade[ LIGHTSHADES * 256 ];
@@ -424,7 +733,10 @@ void USoftwareRenderDevice::InitColorTables( FLOAT Brightness, INT ColorBytes, D
 	
 	FLOAT Scale = (0.50f + Brightness) * 8.0 / (128.0 * 128.0);
 
-	DWORD UnlitValue = Clamp( appRound( (FLOAT)UNLITLEVEL * (0.50f + Brightness) ),0,127);
+	// Goes straight into Photon.DL, which indexes Shade, so it lives in the
+	// same reduced range as LightPentium's output.
+	DWORD UnlitValue = Clamp( appRound( (FLOAT)UNLITLEVEL * (0.50f + Brightness) ),0,127)
+		>> LIGHTSHADEBITS;
 	UnlitPentiumValue = UnlitValue + (UnlitValue << 8) + (UnlitValue <<16) + (UnlitValue << 24);
 
 	int FogR  = appRound( FlashFog.R * (double)( 1<<20 ) );  // 1<<20  
@@ -475,9 +787,12 @@ void USoftwareRenderDevice::InitColorTables( FLOAT Brightness, INT ColorBytes, D
 			}
 		}
 
-		ScaleR += D_ScaleR;
-		ScaleG += D_ScaleG;
-		ScaleB += D_ScaleB;
+		// One step per light level.  With LIGHTSHADES reduced there are fewer
+		// levels covering the same brightness range, so each step is scaled up
+		// to keep the top of the ramp at the same intensity as before.
+		ScaleR += D_ScaleR << LIGHTSHADEBITS;
+		ScaleG += D_ScaleG << LIGHTSHADEBITS;
+		ScaleB += D_ScaleB << LIGHTSHADEBITS;
 
 	}
 	unguardSlow;
@@ -493,6 +808,26 @@ static QWORD LightOSTable[12][4];
 static void SetupOverSampling()
 {
 	guardSlow(SetupOverSampling);
+	#ifdef PLATFORM_AMIGA
+	// GCC/m68k miscompiled the original signed 64-bit shifts used here.  Build
+	// the packed 64-bit delta explicitly from its high and low DWORDs instead.
+	// U occupies the high DWORD; signed V contributes its low DWORD plus the
+	// mathematically correct carry/sign extension into the high DWORD.
+	for( int ubits=0; ubits<12; ubits++ )
+	{
+		for( int i=0,j=3; i<4; j=i++ )
+		{
+			const INT DU = KernelDU[i] - KernelDU[j];
+			const INT DV = KernelDV[i] - KernelDV[j];
+			const DWORD Low = ((DWORD)DV) << 28;
+			const INT VHigh = DV >= 0 ? DV / 16 : -((-DV + 15) / 16);
+			FMMX Delta;
+			Delta.DH = (((DWORD)DU) << (28-ubits)) + (DWORD)VHigh;
+			Delta.DL = Low;
+			LightOSTable[ubits][i] = Delta.Q;
+		}
+	}
+	#else
 	QWORD Tmp[4];
 	for (int ubits = 0; ubits < 12; ubits++)
 	{
@@ -503,6 +838,7 @@ static void SetupOverSampling()
 		for( i=0,j=3; i<4; j=i++ )
 			LightOSTable[ubits][i] = Tmp[i] - Tmp[j];	
 	}
+	#endif
 	unguardSlow;
 }
 
@@ -724,10 +1060,128 @@ static FTexSetup* NoLightPass( FTexSetup* Setup )
 //
 static QWORD LightOS[4]={0,0,0,0};
 
+// Lightmaps contain FColor bytes in R,G,B,A order.  The Pentium path expects
+// numeric 0x00BBGGRR, which a DWORD load produces on little endian.  Pack the
+// same value explicitly on big endian.
+static inline DWORD ReadLightSample( DWORD Index )
+{
+#if __INTEL_BYTE_ORDER__
+	const DWORD Result = LightMip.Data.PtrDWORD[Index];
+#else
+	const BYTE* P = LightMip.Data.PtrBYTE + Index * 4;
+	const DWORD Result = (DWORD)P[0] | ((DWORD)P[1] << 8) | ((DWORD)P[2] << 16);
+#endif
+	SoftLightTraceSample( Index, Result, Result );
+	return Result;
+}
+
+#ifdef PLATFORM_AMIGA
+static inline BYTE Median5Byte( BYTE A, BYTE B, BYTE C, BYTE D, BYTE E )
+{
+	BYTE V[5] = { A, B, C, D, E };
+	for( INT I=1; I<5; I++ )
+	{
+		const BYTE X = V[I];
+		INT J = I;
+		while( J>0 && V[J-1]>X )
+		{
+			V[J] = V[J-1];
+			J--;
+		}
+		V[J] = X;
+	}
+	return V[2];
+}
+
+static inline DWORD LightPentiumAmiga( INT U, INT V )
+{
+	// Form only the 32-bit address word for the current independent U/V pair.
+	// No packed 64-bit coordinate is advanced or shifted here.
+	const DWORD VRotated = _rotl( (DWORD)V, LightMip.LVShift );
+	const DWORD Address = ((((DWORD)U << LightMip.HUShift) & LightMip.RMask.DH)
+		+ (VRotated & LightMip.Mask.DH));
+#if AMIGA_EXACT_LIGHT_INDEX
+	// Match the working portable PPC LightPentium address extraction exactly.
+	// Keep U/V separate to avoid the 68k packed-QWORD arithmetic, but do not
+	// invent a V mask or read neighbouring rows.
+	const DWORD Index
+		= (Address >> (32-LightUBits))
+		+ ((Address & LightMip.Mask.DL) << LightUBits);
+	const DWORD Result = ReadLightSample( Index ) & LIGHTMASK3;
+	SoftLightTraceOutput( Address, Result );
+	return Result;
+#else
+	const DWORD UMask = (1u << LightUBits) - 1;
+	const DWORD VMask = ((LightMip.Mask.DH + 1) >> 3) - 1;
+	const DWORD TU = (Address >> (32-LightUBits)) & UMask;
+	const DWORD TV = Address & VMask;
+	const DWORD C = ReadLightSample( TU + (TV << LightUBits) );
+	const DWORD L = ReadLightSample( ((TU-1)&UMask) + (TV << LightUBits) );
+	const DWORD R = ReadLightSample( ((TU+1)&UMask) + (TV << LightUBits) );
+	const DWORD T = ReadLightSample( TU + (((TV-1)&VMask) << LightUBits) );
+	const DWORD B = ReadLightSample( TU + (((TV+1)&VMask) << LightUBits) );
+	DWORD Result = 0;
+	for( INT Shift=0; Shift<=16; Shift+=8 )
+		Result |= (DWORD)Median5Byte(
+			(BYTE)(C>>Shift), (BYTE)(L>>Shift), (BYTE)(R>>Shift),
+			(BYTE)(T>>Shift), (BYTE)(B>>Shift)) << Shift;
+	Result &= LIGHTMASK3;
+	SoftLightTraceOutput( Address, Result );
+	return Result;
+#endif
+}
+#endif
+
 static inline DWORD LightPentium( FMMX Lit )
 {
 
 #if !ASM 
+	#ifdef PLATFORM_AMIGA
+	#if AMIGA_PACKED_LIGHT_OS
+	// Match the portable PPC path bit-for-bit without asking the 68k compiler
+	// to generate a 64-bit add. DL is the low half; its carry advances DH.
+	FMMX A, B, C, D, Delta;
+	A = Lit;
+	Delta.Q = LightOS[1];
+	{
+		const DWORD OldLow = A.DL;
+		B.DL = A.DL + Delta.DL;
+		B.DH = A.DH + Delta.DH + (B.DL < OldLow);
+	}
+	Delta.Q = LightOS[2];
+	{
+		const DWORD OldLow = B.DL;
+		C.DL = B.DL + Delta.DL;
+		C.DH = B.DH + Delta.DH + (C.DL < OldLow);
+	}
+	Delta.Q = LightOS[3];
+	{
+		const DWORD OldLow = C.DL;
+		D.DL = C.DL + Delta.DL;
+		D.DH = C.DH + Delta.DH + (D.DL < OldLow);
+	}
+
+	const DWORD IndexA = (A.DH >> (32-LightUBits)) + ((A.DH & LightMip.Mask.DL) << LightUBits);
+	const DWORD IndexB = (B.DH >> (32-LightUBits)) + ((B.DH & LightMip.Mask.DL) << LightUBits);
+	const DWORD IndexC = (C.DH >> (32-LightUBits)) + ((C.DH & LightMip.Mask.DL) << LightUBits);
+	const DWORD IndexD = (D.DH >> (32-LightUBits)) + ((D.DH & LightMip.Mask.DL) << LightUBits);
+	const DWORD L1 = ReadLightSample(IndexA) + ReadLightSample(IndexB);
+	const DWORD L2 = ReadLightSample(IndexC) + ReadLightSample(IndexD);
+	const DWORD Result = ((((L1 & 0xfefefe) + (L2 & 0xfefefe)) / 4) >> LIGHTSHADEBITS) & LIGHTMASK3;
+	SoftLightTraceOutput( Lit.DH, Result );
+	return Result;
+	#else
+	// The packed 64-bit four-point LightOS walk corrupts lightmap addressing on
+	// m68k.  Use one sample, while optionally letting LightPassPentium advance
+	// the packed coordinate with an explicit 32-bit carry.
+	const DWORD Index
+		= ((Lit.DH                 ) >> (32-LightUBits))
+		+ ((Lit.DH&LightMip.Mask.DL) << (   LightUBits));
+	const DWORD Result = ReadLightSample(Index) & LIGHTMASK3;
+	SoftLightTraceOutput( Lit.DH, Result );
+	return Result;
+	#endif
+	#else
 
 	FMMX A,B,C,D;
 	A.Q = Lit.Q;
@@ -736,21 +1190,27 @@ static inline DWORD LightPentium( FMMX Lit )
 	D.Q = C.Q + LightOS[3];
 
 	DWORD L1
-	=	LightMip.Data.PtrDWORD
-			[	((A.DH                 ) >> (32-LightUBits))
-			+	((A.DH&LightMip.Mask.DL) << (   LightUBits)) ]
-	+	LightMip.Data.PtrDWORD
-			[	((B.DH                 ) >> (32-LightUBits))
-			+	((B.DH&LightMip.Mask.DL) << (   LightUBits)) ];
+	=	ReadLightSample
+			(	((A.DH                 ) >> (32-LightUBits))
+			+	((A.DH&LightMip.Mask.DL) << (   LightUBits)) )
+	+	ReadLightSample
+			(	((B.DH                 ) >> (32-LightUBits))
+			+	((B.DH&LightMip.Mask.DL) << (   LightUBits)) );
 	DWORD L2
-	=	LightMip.Data.PtrDWORD
-			[	((C.DH                 ) >> (32-LightUBits))
-			+	((C.DH&LightMip.Mask.DL) << (   LightUBits)) ]
-	+	LightMip.Data.PtrDWORD
-			[	((D.DH                 ) >> (32-LightUBits))
-			+	((D.DH&LightMip.Mask.DL) << (   LightUBits)) ];
+	=	ReadLightSample
+			(	((C.DH                 ) >> (32-LightUBits))
+			+	((C.DH&LightMip.Mask.DL) << (   LightUBits)) )
+	+	ReadLightSample
+			(	((D.DH                 ) >> (32-LightUBits))
+			+	((D.DH&LightMip.Mask.DL) << (   LightUBits)) );
 
-	return  (((L1&0xfefefe)+(L2&0xfefefe))/4) & 0x7f7f7f;
+	// Sum of four samples, /4 to average, then >>LIGHTSHADEBITS to land in the
+	// reduced shade range.  Shifting (rather than just masking) keeps bright
+	// values bright instead of wrapping them around to dark.
+	const DWORD Result = ((((L1&0xfefefe)+(L2&0xfefefe))/4) >> LIGHTSHADEBITS) & LIGHTMASK3;
+	SoftLightTraceOutput( Lit.DH, Result );
+	return Result;
+	#endif
 
 #else
 	__asm
@@ -819,10 +1279,36 @@ static inline DWORD LightPentium( FMMX Lit )
 //#debug Optimize!!
 //
 
+#ifdef PLATFORM_AMIGA
+static inline void AdvanceLightCoordinate( FMMX& Coordinate, const FMMX& Delta )
+{
+	// Explicit unsigned 64-bit addition.  DL is the low half and a wrap there
+	// carries into DH.  This avoids the m68k helper/codegen path which produced
+	// occasional bad lightmap rows while walking a span.
+	const DWORD OldLow = Coordinate.DL;
+	Coordinate.DL += Delta.DL;
+	Coordinate.DH += Delta.DH + (Coordinate.DL < OldLow);
+}
+
+static inline void HalfLightCoordinateDelta( FMMX& Delta )
+{
+	// Arithmetic signed 64-bit shift right by one, expressed with 32-bit ops.
+	const DWORD OldHigh = Delta.DH;
+	Delta.DL = (Delta.DL >> 1) | (OldHigh << 31);
+	Delta.DH = (DWORD)(((INT)OldHigh) >> 1);
+}
+#endif
+
 static FTexSetup* LightPassPentium( FTexSetup* Setup )
 {
+	#if defined(PLATFORM_AMIGA) && !AMIGA_PACKED_LIGHT_COORD
+	INT LitU          = Setup->LitU;
+	INT LitV          = Setup->LitV;
+	DWORD RGB         = LightPentiumAmiga( LitU, LitV );
+	#else
 	FMMX Lit        = Setup->Lit;
 	DWORD RGB       = LightPentium( Lit );
+	#endif
 	INT X           = Setup->X;
 
 	// Todo:
@@ -832,7 +1318,12 @@ static FTexSetup* LightPassPentium( FTexSetup* Setup )
 
 	while( (++Setup)->X )
 	{
+		#if defined(PLATFORM_AMIGA) && !AMIGA_PACKED_LIGHT_COORD
+		INT LitDU = Setup->LitU;
+		INT LitDV = Setup->LitV;
+		#else
 		FMMX LitD = Setup->Lit;
+		#endif
 		INT  NX   = X + Setup->X;
 
 		// Smooth light with a quick-and-dirty trick in batches of 16 and 8
@@ -840,9 +1331,20 @@ static FTexSetup* LightPassPentium( FTexSetup* Setup )
 		#if  !ASM
 		while( X+8 <= NX )
 		{
+			#if defined(PLATFORM_AMIGA) && !AMIGA_PACKED_LIGHT_COORD
+			LitU += LitDU;
+			LitV += LitDV;
+			#elif defined(PLATFORM_AMIGA)
+			AdvanceLightCoordinate( Lit, LitD );
+			#else
 			Lit.Q                          += LitD.Q;
+			#endif
 			Photon[X+0].DL = Photon[X+1].DL = RGB;
-			DWORD NextRGB                   = LightPentium( Lit ); 
+			#if defined(PLATFORM_AMIGA) && !AMIGA_PACKED_LIGHT_COORD
+			DWORD NextRGB                   = LightPentiumAmiga( LitU, LitV );
+			#else
+			DWORD NextRGB                   = LightPentium( Lit );
+			#endif
 			DWORD D12                       = ((RGB + NextRGB) & 0xfefefe) >> 1;
 			Photon[X+4].DL = Photon[X+5].DL =   D12;
 			Photon[X+2].DL = Photon[X+3].DL = ((D12 +     RGB) & 0xfefefe) >> 1;
@@ -909,12 +1411,30 @@ static FTexSetup* LightPassPentium( FTexSetup* Setup )
 		{
 			if( X < NX )
 			{
+				#if defined(PLATFORM_AMIGA) && !AMIGA_PACKED_LIGHT_COORD
+				LitDU >>= 1;
+				LitDV >>= 1;
+				#elif defined(PLATFORM_AMIGA)
+				HalfLightCoordinateDelta( LitD );
+				#else
 				LitD.SQ >>= 1;
+				#endif
 				do
 				{
+					#if defined(PLATFORM_AMIGA) && !AMIGA_PACKED_LIGHT_COORD
+					LitU += LitDU;
+					LitV += LitDV;
+					#elif defined(PLATFORM_AMIGA)
+					AdvanceLightCoordinate( Lit, LitD );
+					#else
 					Lit.Q						   += LitD.Q;
+					#endif
 					Photon[X+0].DL = Photon[X+1].DL = RGB;
-					DWORD NextRGB					= LightPentium( Lit ); 
+					#if defined(PLATFORM_AMIGA) && !AMIGA_PACKED_LIGHT_COORD
+					DWORD NextRGB                   = LightPentiumAmiga( LitU, LitV );
+					#else
+					DWORD NextRGB                   = LightPentium( Lit );
+					#endif
 					Photon[X+2].DL = Photon[X+3].DL = ((RGB + NextRGB) & 0xfefefe) >> 1;
 					RGB								= NextRGB;
 					X += 4;
@@ -942,6 +1462,27 @@ static FTexSetup* LightPassPentium( FTexSetup* Setup )
 /*-----------------------------------------------------------------------------
 	Texture mapping pass.
 -----------------------------------------------------------------------------*/
+
+static inline DWORD TexturePassIndex( DWORD Coordinate, DWORD Mask, INT UBits )
+{
+	const DWORD M = Coordinate & Mask;
+	// UBits==0 is valid for 1-pixel-wide mipmaps.  Shifting a DWORD right by
+	// 32 is undefined and GCC/m68k produced unstable texel indices here.
+	return (UBits ? (M >> (32-UBits)) : 0u) + (M << UBits);
+}
+
+static inline void AdvanceTextureCoordinate( FMMX& Coordinate, const FMMX& Delta )
+{
+#ifdef PLATFORM_AMIGA
+	// Tex.Q is a packed 64-bit fixed-point accumulator.  Avoid the m68k
+	// compiler's 64-bit add path and propagate the low-DWORD carry explicitly.
+	const DWORD OldLow = Coordinate.DL;
+	Coordinate.DL += Delta.DL;
+	Coordinate.DH += Delta.DH + (Coordinate.DL < OldLow);
+#else
+	Coordinate.Q += Delta.Q;
+#endif
+}
 
 #if ASM /* Assembler texture mapping */
 
@@ -1037,9 +1578,8 @@ static FTexSetup* LightPassPentium( FTexSetup* Setup )
 				Photon[X].DH \
 				=	Colors \
 				[	Mips[imip].Data.PtrBYTE \
-					[	((Tex.DH&Mips[imip].Mask.DL)>>(32-ubits)) \
-					+	((Tex.DH&Mips[imip].Mask.DL)<<(ubits   )) ] ]; \
-				Tex.Q += DTex.Q; \
+					[	TexturePassIndex( Tex.DH, Mips[imip].Mask.DL, ubits ) ] ]; \
+				AdvanceTextureCoordinate( Tex, DTex ); \
 			} while( ++X < NX ); \
 			/* Photon[X-1].DH = Colors[255]; indicator ?*/\
 			X = NX; \
@@ -1378,6 +1918,7 @@ static void MergePass16Modulated( INT Y, INT X, INT InnerX )
 		(  Min (  ( Shade[SHADE_B + Photon[X+0].SB2 + Photon[X+0].SB1*256] * (ScreenPix & 0x001f) ) >> ( 0+5), (DWORD) 31)       )+
 		(  Min (  ( Shade[SHADE_G + Photon[X+0].SG2 + Photon[X+0].SG1*256] * (ScreenPix & 0x07E0) ) >> ( 5+5), (DWORD) 63)   <<  5 )+
 		(  Min (  ( Shade[SHADE_R + Photon[X+0].SR2 + Photon[X+0].SR1*256] * (ScreenPix & 0xF800) ) >> (11+5+2), (DWORD) 31) << 11 );
+		SoftLightTraceMerge( Photon[X].DH, Photon[X].DL, ScreenDest.PtrWORD[X] );
 	}
 	while( ++X < InnerX );
 };
@@ -1395,6 +1936,7 @@ static void MergePass1516Masked( INT Y, INT X, INT InnerX )
 			Shade[SHADE_B  + Photon[X+0].SB2 + Photon[X+0].SB1*256]       +
 			Shade[SHADE_G  + Photon[X+0].SG2 + Photon[X+0].SG1*256] *  32 +
    			Shade[SHADE_R  + Photon[X+0].SR2 + Photon[X+0].SR1*256] * 256 ;
+			SoftLightTraceMerge( Photon[X].DH, Photon[X].DL, ScreenDest.PtrWORD[X] );
 		}
 	}
 	while( ++X < InnerX );
@@ -1403,16 +1945,96 @@ static void MergePass1516Masked( INT Y, INT X, INT InnerX )
 
 
 
+// MergePass1516 variant selector.  Override from the build with
+// -DMERGEPASS_VARIANT=n.
+//
+//   0 = original: each Photon channel read as a separate indexed byte.
+//   1 = two longword loads per Photon, channels extracted with shifts.
+//       Fewer and wider loads, half the code size (160 vs 316 bytes), and the
+//       channel extraction is bit-identical (verified over 3M random values).
+//
+// Variant 1 measured 34.24 -> 28.9 FPS, but repeated runs of one unchanged
+// binary later spanned 32.1 - 37.9 FPS (17%) under WinUAE, so that figure sits
+// inside the noise and settles nothing.  Use SOFTDRV_PIXEL_STATS below rather
+// than framerate to compare these.
+#ifndef MERGEPASS_VARIANT
+#define MERGEPASS_VARIANT 0
+#endif
+
+// Pixel/call counters; SOFTDRV_PIXEL_STATS is defined in SoftDrvPrivate.h so
+// SoftDrv.cpp can dump these at shutdown.
+#if SOFTDRV_PIXEL_STATS
+// 64-bit: a benchmark run pushes well past 2^32 pixels.
+QWORD GSoftDrvMergePixels = 0;
+QWORD GSoftDrvMergeCalls  = 0;
+#define MERGE_STAT( Pixels ) \
+	do { GSoftDrvMergePixels += (QWORD)(Pixels); GSoftDrvMergeCalls++; } while(0)
+#else
+#define MERGE_STAT( Pixels ) do { } while(0)
+#endif
+
 static void MergePass1516( INT Y, INT X, INT InnerX )
 {
+	// Counted once per call, outside the pixel loop, so the instrumentation
+	// cannot distort the loop it is measuring.
+	MERGE_STAT( InnerX - X );
+#ifdef PLATFORM_AMIGA
+	// ReadLightSample and MakeQuadPalette both produce numeric 0x00BBGGRR.
+	// The old 68k merge treated the light half as 0x00RRGGBB, swapping red and
+	// blue only for lighting. Keep that historical path selectable while the
+	// corrected build matches each texture channel with the same light channel.
+	do
+	{
+		const DWORD Tex = Photon[X].DH;
+		const DWORD Lit = Photon[X].DL;
+		const _WORD Pixel = (_WORD)
+		(
+		#if AMIGA_MATCH_LIGHT_CHANNELS
+			Shade[SHADE_B + ((Tex >> 16) & 0xff) + (((Lit >> 16) & 0xff) << 8)]
+			+ (Shade[SHADE_G + ((Tex >>  8) & 0xff) + (((Lit >>  8) & 0xff) << 8)] << 5)
+			+ (Shade[SHADE_R + ( Tex        & 0xff) + (( Lit        & 0xff) << 8)] << 8)
+		#else
+			Shade[SHADE_B + ((Tex >> 16) & 0xff) + (( Lit        & 0xff) << 8)]
+			+ (Shade[SHADE_G + ((Tex >>  8) & 0xff) + (((Lit >>  8) & 0xff) << 8)] << 5)
+			+ (Shade[SHADE_R + ( Tex        & 0xff) + (((Lit >> 16) & 0xff) << 8)] << 8)
+		#endif
+		);
+		ScreenDest.PtrWORD[X] = Pixel;
+		SoftLightTraceMerge( Tex, Lit, Pixel );
+	}
+	while( ++X < InnerX );
+#elif MERGEPASS_VARIANT == 1
+	// Big-endian FMMX layout: bytes A2 B2 G2 R2 | A1 B1 G1 R1, so DH holds the
+	// texture half and DL the lightmap half, each as 0x00BBGGRR.
+	const FMMX* P = &Photon[X];
+	_WORD* Dest = &ScreenDest.PtrWORD[X];
+	// Matches the original do/while: always draws at least one pixel.
+	INT Count = InnerX - X;
+	if( Count < 1 )
+		Count = 1;
+	do
+	{
+		const DWORD Tex = P->DH;
+		const DWORD Lit = P->DL;
+		*Dest++ =
+		( Shade[SHADE_B + ((Tex>>16)&0xff) + (((Lit>>16)&0xff)<<8)]       ) +
+		( Shade[SHADE_G + ((Tex>> 8)&0xff) + (((Lit>> 8)&0xff)<<8)] <<  5 ) +
+		( Shade[SHADE_R + ( Tex     &0xff) + (( Lit     &0xff)<<8)] <<  8 ) ;
+		SoftLightTraceMerge( Tex, Lit, Dest[-1] );
+		P++;
+	}
+	while( --Count );
+#else
 	do
 	{
 		ScreenDest.PtrWORD[X+0] =
 		( Shade[SHADE_B  + Photon[X+0].SB2 + Photon[X+0].SB1*256]       ) +
 		( Shade[SHADE_G  + Photon[X+0].SG2 + Photon[X+0].SG1*256] <<  5 ) +
   		( Shade[SHADE_R  + Photon[X+0].SR2 + Photon[X+0].SR1*256] <<  8 ) ;
+		SoftLightTraceMerge( Photon[X].DH, Photon[X].DL, ScreenDest.PtrWORD[X] );
 	}
 	while( ++X < InnerX );
+#endif
 };
 
 
@@ -1430,6 +2052,7 @@ static void MergePass1516Stippled( INT Y, INT X, INT InnerX )
 				( Shade[SHADE_B  + Photon[X+0].SB2 + Photon[X+0].SB1*256]      ) +
 				( Shade[SHADE_G  + Photon[X+0].SG2 + Photon[X+0].SG1*256] << 5 ) +
    				( Shade[SHADE_R  + Photon[X+0].SR2 + Photon[X+0].SR1*256] << 8 ) ;
+				SoftLightTraceMerge( Photon[X].DH, Photon[X].DL, ScreenDest.PtrWORD[X] );
 			}
 		}
 		while( (X +=2) < InnerX );
@@ -20410,6 +21033,13 @@ void USoftwareRenderDevice::DrawComplexSurface( FSceneNode* Frame, FSurfaceInfo&
 	INT IsTranslucent = (Surface.PolyFlags & PF_Translucent);
 	INT IsMasked      = (Surface.PolyFlags & PF_Masked);
 	INT IsStippled    = (IsTranslucent) && (FastTranslucency);
+	SoftLightTraceSetPass
+	(
+		IsMasked ? 1 :
+		(IsTranslucent && IsStippled) ? 2 :
+		IsModulated ? 3 :
+		IsTranslucent ? 4 : 0
+	);
 
 	INT RefreshSetupFlag = 0;
 
@@ -20730,6 +21360,7 @@ void USoftwareRenderDevice::DrawComplexSurface( FSceneNode* Frame, FSurfaceInfo&
 			LightMip.FogData.PtrVOID = Surface.FogMap->Mips[0]->DataPtr;		
 		    
 		LightMip.Data.PtrVOID = NULL;
+		SoftLightTraceSurface( Surface );
 		if( Surface.LightMap )
 		{   
 			LastWasUnlit = 0;

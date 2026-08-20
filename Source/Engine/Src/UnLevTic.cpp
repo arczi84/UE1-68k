@@ -9,6 +9,13 @@
 #include "EnginePrivate.h"
 #include "UnNet.h"
 
+#ifdef PLATFORM_AMIGA
+extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+extern "C" DWORD SDL_GetTicks( void );
+static INT GAmigaTickPhaseRemaining = 0;
+INT GAmigaActorProfileRequests = 0;
+#endif
+
 /*-----------------------------------------------------------------------------
 	Helper classes.
 -----------------------------------------------------------------------------*/
@@ -56,6 +63,16 @@ struct FActorPriority
 UBOOL AActor::Tick( FLOAT DeltaSeconds, ELevelTick TickType )
 {
 	guard(AActor::Tick);
+
+#ifdef PLATFORM_AMIGA
+	const UBOOL AmigaPhaseProfile = GAmigaTickPhaseRemaining>0 && appStricmp(GetClass()->GetName(),"Bird1")==0;
+	const DWORD AmigaPhaseStart = AmigaPhaseProfile ? SDL_GetTicks() : 0;
+	DWORD AmigaPhaseAfterAnim = AmigaPhaseStart;
+	DWORD AmigaPhaseEventTickMs = 0;
+	DWORD AmigaPhaseStateMs = 0;
+	DWORD AmigaPhaseTimerMs = 0;
+	DWORD AmigaPhasePhysicsMs = 0;
+#endif
 
 	// Ignore actors in stasis
 	if ( bStasis 
@@ -203,6 +220,11 @@ UBOOL AActor::Tick( FLOAT DeltaSeconds, ELevelTick TickType )
 		}
 	}
 
+#ifdef PLATFORM_AMIGA
+	if( AmigaPhaseProfile )
+		AmigaPhaseAfterAnim = SDL_GetTicks();
+#endif
+
 	// This actor is tickable.
 	if ( bSimulatedPawn )
 		//simulated pawns just predict location, no script execution
@@ -246,7 +268,16 @@ UBOOL AActor::Tick( FLOAT DeltaSeconds, ELevelTick TickType )
 
 			// Tick the nonplayer.
 			if ( IsProbing(NAME_Tick) )
+			{
+			#ifdef PLATFORM_AMIGA
+				const DWORD AmigaEventTickStart = AmigaPhaseProfile ? SDL_GetTicks() : 0;
+			#endif
 				eventTick(DeltaSeconds);
+			#ifdef PLATFORM_AMIGA
+				if( AmigaPhaseProfile )
+					AmigaPhaseEventTickMs += SDL_GetTicks()-AmigaEventTickStart;
+			#endif
+			}
 		}
 		else
 		{
@@ -262,9 +293,19 @@ UBOOL AActor::Tick( FLOAT DeltaSeconds, ELevelTick TickType )
 		}
 
 		// Update the actor's script state code.
+	#ifdef PLATFORM_AMIGA
+		const DWORD AmigaStateStart = AmigaPhaseProfile ? SDL_GetTicks() : 0;
+	#endif
 		ProcessState( DeltaSeconds );
+	#ifdef PLATFORM_AMIGA
+		if( AmigaPhaseProfile )
+			AmigaPhaseStateMs += SDL_GetTicks()-AmigaStateStart;
+	#endif
 
 		// Update timers.
+	#ifdef PLATFORM_AMIGA
+		const DWORD AmigaTimerStart = AmigaPhaseProfile ? SDL_GetTicks() : 0;
+	#endif
 		if( TimerRate>0.0 && (TimerCounter+=DeltaSeconds)>=TimerRate )
 		{
 			// Normalize the timer count.
@@ -284,6 +325,10 @@ UBOOL AActor::Tick( FLOAT DeltaSeconds, ELevelTick TickType )
 			// Call timer routine with count of timer events that have passed.
 			eventTimer();
 		}
+	#ifdef PLATFORM_AMIGA
+		if( AmigaPhaseProfile )
+			AmigaPhaseTimerMs += SDL_GetTicks()-AmigaTimerStart;
+	#endif
 
 		// Update LifeSpan.
 		if( LifeSpan!=0.f )
@@ -299,8 +344,29 @@ UBOOL AActor::Tick( FLOAT DeltaSeconds, ELevelTick TickType )
 		}
 
 		// Perform physics.
+	#ifdef PLATFORM_AMIGA
+		// MaleBodyThree is a placed decorative corpse whose class default is
+		// PHYS_None.  A saved instance can nevertheless restore a non-zero
+		// physics mode and remain wedged in MoveActor collision processing,
+		// costing almost one second every frame on 68k.  Preserve the corpse
+		// and its collision/damage behaviour, but restore its intended mode.
+		if( Physics!=PHYS_None && appStricmp(GetClass()->GetName(),"MaleBodyThree")==0 )
+		{
+			AmigaDebugLogf( "[Amiga] CORPSEFIX actor=%s physics=%d -> PHYS_None", GetName(), (INT)Physics );
+			setPhysics( PHYS_None );
+		}
+	#endif
 		if( (Physics!=PHYS_None) && (Role!=ROLE_AutonomousProxy) )
+		{
+		#ifdef PLATFORM_AMIGA
+			const DWORD AmigaPhysicsStart = AmigaPhaseProfile ? SDL_GetTicks() : 0;
+		#endif
 			performPhysics( DeltaSeconds );
+		#ifdef PLATFORM_AMIGA
+			if( AmigaPhaseProfile )
+				AmigaPhasePhysicsMs += SDL_GetTicks()-AmigaPhysicsStart;
+		#endif
+		}
 
 		if ( (Role == ROLE_AutonomousProxy) 
 			&& Base && Base->IsA(AMover::StaticClass)
@@ -357,6 +423,21 @@ UBOOL AActor::Tick( FLOAT DeltaSeconds, ELevelTick TickType )
 			}
 		}
 	}
+#ifdef PLATFORM_AMIGA
+	if( AmigaPhaseProfile )
+	{
+		const DWORD AmigaPhaseEnd = SDL_GetTicks();
+		FMainFrame* Frame = GetMainFrame();
+		AmigaDebugLogf( "[Amiga] TICKPHASE actor=%s total=%lu anim=%lu eventTick=%lu state=%lu timer=%lu physics=%lu latent=%d latentFloat=%.3f stateName=%s",
+			GetName(), (unsigned long)(AmigaPhaseEnd-AmigaPhaseStart),
+			(unsigned long)(AmigaPhaseAfterAnim-AmigaPhaseStart),
+			(unsigned long)AmigaPhaseEventTickMs, (unsigned long)AmigaPhaseStateMs,
+			(unsigned long)AmigaPhaseTimerMs, (unsigned long)AmigaPhasePhysicsMs,
+			Frame ? Frame->LatentAction : -1, LatentFloat,
+			(Frame && Frame->StateNode) ? Frame->StateNode->GetName() : "None" );
+		--GAmigaTickPhaseRemaining;
+	}
+#endif
 	return 1;
 	unguard;
 }
@@ -582,6 +663,13 @@ void ULevel::Tick( ELevelTick TickType, FLOAT DeltaSeconds )
 
 	// Update time.
 	ALevelInfo* Info = GetLevelInfo();
+	#ifdef PLATFORM_AMIGA
+	// Some serialized LevelInfo instances arrive with a zero TimeDilation on
+	// the 68k port.  That makes the clamp below advance the game by only 1 ms
+	// per rendered frame, which is the observed slow-motion behaviour.
+	if( Info->TimeDilation <= 0.0f )
+		Info->TimeDilation = 1.0f;
+	#endif
 	DeltaSeconds *= Info->TimeDilation;
 	TimeSeconds += DeltaSeconds;
 	Info->TimeSeconds = TimeSeconds;
@@ -603,9 +691,51 @@ void ULevel::Tick( ELevelTick TickType, FLOAT DeltaSeconds )
 		uclock(ActorTickCycles);
 		NewlySpawned=NULL;
 		INT Updated=0;
+	#ifdef PLATFORM_AMIGA
+		const UBOOL AmigaProfileActors = Num()>300 && GAmigaActorProfileRequests>0;
+		UClass* AmigaPerfClasses[128];
+		DWORD AmigaPerfClassMs[128];
+		INT AmigaPerfClassCount[128];
+		INT AmigaPerfClassNum = 0;
+		if( AmigaProfileActors )
+		{
+			appMemset( AmigaPerfClasses, 0, sizeof(AmigaPerfClasses) );
+			appMemset( AmigaPerfClassMs, 0, sizeof(AmigaPerfClassMs) );
+			appMemset( AmigaPerfClassCount, 0, sizeof(AmigaPerfClassCount) );
+		}
+		const DWORD AmigaActorLoopStart = AmigaProfileActors ? SDL_GetTicks() : 0;
+	#endif
 		for( INT iActor=iFirstDynamicActor; iActor<Num(); iActor++ )
 			if( Actors(iActor) )
-				Updated += Actors(iActor)->Tick(DeltaSeconds,TickType);
+			{
+				AActor* TickActor = Actors(iActor);
+			#ifdef PLATFORM_AMIGA
+				const DWORD AmigaActorStart = AmigaProfileActors ? SDL_GetTicks() : 0;
+			#endif
+				Updated += TickActor->Tick(DeltaSeconds,TickType);
+			#ifdef PLATFORM_AMIGA
+				if( AmigaProfileActors )
+				{
+					UClass* ActorClass = TickActor->GetClass();
+					INT ClassIndex = 0;
+					while( ClassIndex<AmigaPerfClassNum && AmigaPerfClasses[ClassIndex]!=ActorClass )
+						ClassIndex++;
+					if( ClassIndex==AmigaPerfClassNum && AmigaPerfClassNum<ARRAY_COUNT(AmigaPerfClasses) )
+					{
+						AmigaPerfClasses[ClassIndex] = ActorClass;
+						AmigaPerfClassNum++;
+					}
+					if( ClassIndex<AmigaPerfClassNum )
+					{
+						AmigaPerfClassMs[ClassIndex] += SDL_GetTicks()-AmigaActorStart;
+						AmigaPerfClassCount[ClassIndex]++;
+					}
+				}
+			#endif
+			}
+	#ifdef PLATFORM_AMIGA
+		const DWORD AmigaSpawnLoopStart = AmigaProfileActors ? SDL_GetTicks() : 0;
+	#endif
 		while( NewlySpawned && Updated )
 		{
 			FActorLink* Link=NewlySpawned;
@@ -614,6 +744,30 @@ void ULevel::Tick( ELevelTick TickType, FLOAT DeltaSeconds )
 			for( Link; Link; Link=Link->Next )
 				Updated += Link->Actor->Tick( DeltaSeconds, TickType );
 		}
+	#ifdef PLATFORM_AMIGA
+		if( AmigaProfileActors )
+		{
+			const DWORD AmigaActorLoopEnd = SDL_GetTicks();
+			AmigaDebugLogf( "[Amiga] AUTOPERF actors=%d dynamicStart=%d actorLoop=%lu spawnLoop=%lu classes=%d",
+				Num(), iFirstDynamicActor,
+				(unsigned long)(AmigaActorLoopEnd-AmigaActorLoopStart),
+				(unsigned long)(AmigaActorLoopEnd-AmigaSpawnLoopStart), AmigaPerfClassNum );
+			for( INT Rank=0; Rank<12; Rank++ )
+			{
+				INT Best = -1;
+				for( INT ClassIndex=0; ClassIndex<AmigaPerfClassNum; ClassIndex++ )
+					if( Best<0 || AmigaPerfClassMs[ClassIndex]>AmigaPerfClassMs[Best] )
+						Best = ClassIndex;
+				if( Best<0 || AmigaPerfClassMs[Best]==0 )
+					break;
+				AmigaDebugLogf( "[Amiga] AUTOPERF rank=%d class=%s count=%d ms=%lu",
+					Rank+1, AmigaPerfClasses[Best]->GetName(), AmigaPerfClassCount[Best],
+					(unsigned long)AmigaPerfClassMs[Best] );
+				AmigaPerfClassMs[Best] = 0;
+			}
+			--GAmigaActorProfileRequests;
+		}
+	#endif
 	}
 	else if( Info->Pauser[0] )
 	{

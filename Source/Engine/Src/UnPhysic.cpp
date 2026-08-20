@@ -414,6 +414,19 @@ void APawn::physWalking(FLOAT deltaTime, INT Iterations)
 {
 	guard(APawn::physWalking);
 
+#ifdef PLATFORM_AMIGA
+	// NaliRabbit's grazing state combines bCanJump=false with the complete
+	// walking ledge solver. A delayed frame is split into up to eight
+	// substeps, each doing many BSP traces, creating a multi-second feedback
+	// loop on 68k. Rabbits are decorative: retain movement, floor and wall
+	// collision, but use the regular post-move floor test instead of the
+	// expensive predictive ledge search and bound their simulation step.
+	const UBOOL AmigaSimpleRabbit =
+		appStricmp(GetClass()->GetName(),"NaliRabbit")==0;
+	if( AmigaSimpleRabbit && deltaTime > 0.05f )
+		deltaTime = 0.05f;
+#endif
+
 	//bound acceleration
 	//goal - support +-Z gravity, but not other vectors
 	Velocity.Z = 0;
@@ -473,7 +486,11 @@ void APawn::physWalking(FLOAT deltaTime, INT Iterations)
 				ForwardCheck *= 0.5; 
 			// if AI controlled, check for fall by doing trace forward
 			// try to find reasonable walk along ledge
-			if ( (!IsA(APlayerPawn::StaticClass) || bIsWalking) && !bCanFly ) 
+			if ( (!IsA(APlayerPawn::StaticClass) || bIsWalking) && !bCanFly
+#ifdef PLATFORM_AMIGA
+				&& !AmigaSimpleRabbit
+#endif
+			)
 			{
 				FVector Destn = Location + Delta + ForwardCheck;
 				GetLevel()->SingleLineCheck(Hit, this, Destn, Location, TRACE_VisBlocking);  

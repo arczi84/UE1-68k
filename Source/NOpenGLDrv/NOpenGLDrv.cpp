@@ -7,6 +7,8 @@
 extern "C" void AmigaDebugLogf( const char* Fmt, ... );
 // Keep this in .data: libnix/-noixemul does not clear the executable BSS.
 static INT GAmigaTextureTraceRemaining = 12;
+static INT GAmigaLightmapTraceRemaining = 1;
+static INT GAmigaLightmapBlendTraceRemaining = 1;
 #endif
 
 /*-----------------------------------------------------------------------------
@@ -69,17 +71,25 @@ UNOpenGLRenderDevice::UNOpenGLRenderDevice()
 	AutoFOV = true;
 	UseWindowBrightness = true;
 	CurrentBrightness = -1.f;
+	TextureUploadSemantic = 0;
 	SwapInterval = 1;
 #ifdef PLATFORM_AMIGA
-	// Use a conservative OpenGL 1.1 profile for the current single-TMU Amiga
-	// path.  Start with the base pass while the remaining UE state issues are
-	// diagnosed; users can raise quality after that path is stable.
-	NoFiltering = true;
+	// QuarkTex handles filtered OpenGL 1.1 textures correctly.  Keep the
+	// single-TMU compatibility path, but do not deliberately force the blocky
+	// nearest-neighbour fallback now that the base renderer is stable.
+	NoFiltering = false;
 	UseHwPalette = false;
 	UseBGRA = false;
-	DetailTextures = false;
+	DetailTextures = true;
 	UseMultiTexture = false;
 	SwapInterval = 0;
+	// Match the Linux renderer's high-quality feature set. These inherited
+	// flags control whether UE1 even submits mirrors, fog, coronas and
+	// high-detail actors to the render device.
+	VolumetricLighting = true;
+	ShinySurfaces = true;
+	Coronas = true;
+	HighDetailActors = true;
 #endif
 }
 
@@ -392,18 +402,23 @@ void UNOpenGLRenderDevice::DrawComplexSurfaceSingleTex( FSceneNode* Frame, FSurf
 		glEnd();
 	}
 
-	// Draw lightmap.  Temporarily keep AmigaMesa on the base-texture pass while
-	// diagnosing its legacy single-unit blend path.
-	if( Surface.LightMap
-#ifdef PLATFORM_AMIGA
-		&& false
-#endif
-	)
+	// Draw the static/dynamic lightmap as a second modulated pass.
+	if( Surface.LightMap )
 	{
 		SetBlend( PF_Modulated );
+#ifdef PLATFORM_AMIGA
+		// QuarkTex/legacy AmigaMesa produces a black result for UE1's desktop
+		// overbright equation (DST_COLOR, SRC_COLOR).  Use the basic one-times
+		// modulation for this pass; the uploaded 7-bit lightmap is already
+		// expanded to the full 8-bit range.
+		glEnable( GL_BLEND );
+		glBlendFunc( GL_DST_COLOR, GL_ZERO );
+#endif
 		if( Surface.PolyFlags & PF_Masked )
 			glDepthFunc( GL_EQUAL );
+		TextureUploadSemantic = 1;
 		SetTexture( 0, *Surface.LightMap, 0, -0.5 );
+		TextureUploadSemantic = 0;
 		glColor4f( 1.f, 1.f, 1.f, 1.f );
 		for( FSavedPoly* Poly = Facet.Polys; Poly; Poly = Poly->Next )
 		{
@@ -417,9 +432,26 @@ void UNOpenGLRenderDevice::DrawComplexSurfaceSingleTex( FSceneNode* Frame, FSurf
 			}
 			glEnd();
 		}
+#ifdef PLATFORM_AMIGA
+		if( GAmigaLightmapBlendTraceRemaining > 0 )
+		{
+			AmigaDebugLogf( "[Amiga] lightmap pass GL error=0x%04lx", (unsigned long)glGetError() );
+			--GAmigaLightmapBlendTraceRemaining;
+		}
+		// Keep CurrentPolyFlags and the actual GL state synchronized for a
+		// following detail-texture pass.
+		glBlendFunc( GL_DST_COLOR, GL_SRC_COLOR );
+#endif
 		if( Surface.PolyFlags & PF_Masked )
 			glDepthFunc( GL_LEQUAL );
 	}
+
+#ifdef PLATFORM_AMIGA
+	// Do not let the last single-TMU overlay pass leak its depth function into
+	// later world or canvas draws.  Blend/texture state is normalized at the
+	// consumer because the next primitive may use a different UE poly style.
+	glDepthFunc( GL_LEQUAL );
+#endif
 
 	// Draw detail texture overlaid.
 	if( Surface.DetailTexture && DetailTextures )
@@ -445,17 +477,15 @@ void UNOpenGLRenderDevice::DrawComplexSurfaceSingleTex( FSceneNode* Frame, FSurf
 			glDepthFunc( GL_LEQUAL );
 	}
 
-	// Draw fog (same single-pass Amiga fallback as lightmaps above).
-	if( Surface.FogMap
-#ifdef PLATFORM_AMIGA
-		&& false
-#endif
-	)
+	// Draw volumetric fog as an additive second pass.
+	if( Surface.FogMap )
 	{
 		SetBlend( PF_Highlighted );
 		if( Surface.PolyFlags & PF_Masked )
 			glDepthFunc( GL_EQUAL );
+		TextureUploadSemantic = 2;
 		SetTexture( 0, *Surface.FogMap, 0, -0.5 );
+		TextureUploadSemantic = 0;
 		for( FSavedPoly* Poly = Facet.Polys; Poly; Poly = Poly->Next )
 		{
 			glBegin( GL_TRIANGLE_FAN );
@@ -481,6 +511,14 @@ void UNOpenGLRenderDevice::DrawGouraudPolygon( FSceneNode* Frame, FTextureInfo& 
 		uclock(GouraudCycles);
 		SetBlend( PolyFlags );
 		SetTexture( 0, Texture, ( PolyFlags & PF_Masked ), 0 );
+#ifdef PLATFORM_AMIGA
+		// QuarkTex state can have texturing disabled while our cache still says
+		// this texture is current.  SetTexture then returns early and a mesh is
+		// rendered as its bare Gouraud colour (white/cyan) until another bind.
+		// Reassert the fixed-function texture state for every mesh polygon.
+		glEnable( GL_TEXTURE_2D );
+		glTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE );
+#endif
 		ResetTexture( 1 );
 		ResetTexture( 2 );
 		ResetTexture( 3 );
@@ -501,7 +539,14 @@ void UNOpenGLRenderDevice::DrawGouraudPolygon( FSceneNode* Frame, FTextureInfo& 
 		}
 		glEnd();
 
-		if( (PolyFlags & (PF_RenderFog|PF_Translucent|PF_Modulated)) == PF_RenderFog )
+		if( (PolyFlags & (PF_RenderFog|PF_Translucent|PF_Modulated)) == PF_RenderFog
+#ifdef PLATFORM_AMIGA
+			// The legacy QuarkTex/StormMesa actor fog overlay saturates model
+			// polygons to white or cyan depending on view angle.  BSP fog maps use
+			// a separate path and remain enabled.
+			&& false
+#endif
+		)
 		{
 			ResetTexture( 0 );
 			SetBlend( PF_Highlighted );
@@ -526,10 +571,34 @@ void UNOpenGLRenderDevice::DrawTile( FSceneNode* Frame, FTextureInfo& Texture, F
 	SetSceneNode( Frame );
 	uclock(TileCycles);
 	const UBOOL IsCanvasOverlay = ( PolyFlags & PF_RenderHint ) != 0;
+	// QuarkTex clips Canvas vertices placed exactly on glFrustum's near plane,
+	// while Wazp3D accepts them.  Scaling X/Y by the same small Z offset keeps
+	// the screen-space position unchanged after perspective division.
+	const FLOAT DrawZ = IsCanvasOverlay ? ::Max( Z, 1.01f ) : Z;
+#ifdef PLATFORM_AMIGA
+	// Single-TMU detail/light/fog passes deliberately change several pieces of
+	// global fixed-function state.  Establish a known baseline before every
+	// canvas tile instead of relying on CurrentPolyFlags to describe state that
+	// a preceding pass may have changed directly.
+	glColorMask( GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE );
+	glDepthFunc( GL_LEQUAL );
+	glDepthMask( GL_TRUE );
+	glDisable( GL_BLEND );
+	glBlendFunc( GL_ONE, GL_ZERO );
+	glDisable( GL_ALPHA_TEST );
+	glEnable( GL_TEXTURE_2D );
+	glTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE );
+	CurrentPolyFlags = PF_Occlude;
+#endif
 	if( IsCanvasOverlay )
 		glDisable( GL_DEPTH_TEST );
 	SetBlend( PolyFlags );
 	SetTexture( 0, Texture, ( PolyFlags & PF_Masked ), 0.f );
+#ifdef PLATFORM_AMIGA
+	// SetTexture may return early on a cache hit; keep texturing enabled even
+	// if a previous pass reset the actual GL unit without changing that cache.
+	glEnable( GL_TEXTURE_2D );
+#endif
 	ResetTexture( 1 );
 	ResetTexture( 2 );
 	ResetTexture( 3 );
@@ -541,13 +610,13 @@ void UNOpenGLRenderDevice::DrawTile( FSceneNode* Frame, FTextureInfo& Texture, F
 
 	glBegin( GL_TRIANGLE_FAN );
 		glTexCoord2f( (U   )*TexInfo[0].UMult, (V   )*TexInfo[0].VMult );
-		glVertex3f( RFX2*Z*(X   -Frame->FX2), RFY2*Z*(Y   -Frame->FY2), Z );
+		glVertex3f( RFX2*DrawZ*(X   -Frame->FX2), RFY2*DrawZ*(Y   -Frame->FY2), DrawZ );
 		glTexCoord2f( (U+UL)*TexInfo[0].UMult, (V   )*TexInfo[0].VMult );
-		glVertex3f( RFX2*Z*(X+XL-Frame->FX2), RFY2*Z*(Y   -Frame->FY2), Z );
+		glVertex3f( RFX2*DrawZ*(X+XL-Frame->FX2), RFY2*DrawZ*(Y   -Frame->FY2), DrawZ );
 		glTexCoord2f( (U+UL)*TexInfo[0].UMult, (V+VL)*TexInfo[0].VMult );
-		glVertex3f( RFX2*Z*(X+XL-Frame->FX2), RFY2*Z*(Y+YL-Frame->FY2), Z );
+		glVertex3f( RFX2*DrawZ*(X+XL-Frame->FX2), RFY2*DrawZ*(Y+YL-Frame->FY2), DrawZ );
 		glTexCoord2f( (U   )*TexInfo[0].UMult, (V+VL)*TexInfo[0].VMult );
-		glVertex3f( RFX2*Z*(X   -Frame->FX2), RFY2*Z*(Y+YL-Frame->FY2), Z );
+		glVertex3f( RFX2*DrawZ*(X   -Frame->FX2), RFY2*DrawZ*(Y+YL-Frame->FY2), DrawZ );
 	glEnd();
 
 	if( IsCanvasOverlay )
@@ -836,9 +905,8 @@ void UNOpenGLRenderDevice::SetTexture( INT TMU, FTextureInfo& Info, DWORD PolyFl
 		// New texture or it has changed, upload it.
 		Info.TextureFlags &= ~TF_RealtimeChanged;
 		UploadTexture( Info, ( PolyFlags & PF_Masked ), !OldBind );
-		// Set mip filtering if there are mips.  AmigaMesa can treat UE1's
-		// deliberately shortened mip chains as incomplete and samples them white,
-		// so the Amiga upload path uses level zero and a non-mipmapped filter.
+		// QuarkTex/AmigaMesa treats UE1 mip chains as incomplete and samples the
+		// whole texture white.  Keep the verified level-zero, non-mipmapped path.
 #ifdef PLATFORM_AMIGA
 		const UBOOL HasMipmaps = false;
 #else
@@ -950,6 +1018,7 @@ void UNOpenGLRenderDevice::ConvertTextureMipBGRA7777( const FMipmap* Mip, BYTE*&
 {
 	// BGRA8888. This is actually a BGRA7777 lightmap, so we need to scale it.
 	const BYTE* Src = (const BYTE*)Mip->DataPtr;
+	const BYTE* RawStart = Src;
 	const DWORD Count = Mip->USize * Mip->VSize;
 	EnsureComposeSize( Count * 4 );
 	BYTE* Dst = (BYTE*)Compose;
@@ -978,6 +1047,47 @@ void UNOpenGLRenderDevice::ConvertTextureMipBGRA7777( const FMipmap* Mip, BYTE*&
 			*Dst++ = Src[3] << 1;
 		}
 	}
+#ifdef PLATFORM_AMIGA
+	if( TextureUploadSemantic==1 )
+	{
+		BYTE MaxRGB=0;
+		for( DWORD i=0; i<Count; ++i )
+		{
+			MaxRGB=Max(MaxRGB,RawStart[i*4+0]);
+			MaxRGB=Max(MaxRGB,RawStart[i*4+1]);
+			MaxRGB=Max(MaxRGB,RawStart[i*4+2]);
+		}
+		// QuarkTex uses one-times modulation instead of the desktop renderer's
+		// 2x overbright equation. Compensate by doubling the uploaded lightmap.
+		// Do not apply an RGB floor here: it raises the weak channels of colored
+		// lights and turns saturated red/blue lighting into grey illumination.
+		for( DWORD i=0; i<Count; ++i )
+		{
+			UploadBuf[i*4+0]=Min((INT)UploadBuf[i*4+0]*2,255);
+			UploadBuf[i*4+1]=Min((INT)UploadBuf[i*4+1]*2,255);
+			UploadBuf[i*4+2]=Min((INT)UploadBuf[i*4+2]*2,255);
+			UploadBuf[i*4+3]=255;
+		}
+	}
+	if( GAmigaLightmapTraceRemaining > 0 )
+	{
+		BYTE RawMax[4]={0,0,0,0};
+		BYTE OutMax[4]={0,0,0,0};
+		for( DWORD i=0; i<Count; ++i )
+		{
+			for( INT c=0; c<4; ++c )
+			{
+				RawMax[c]=Max(RawMax[c],RawStart[i*4+c]);
+				OutMax[c]=Max(OutMax[c],UploadBuf[i*4+c]);
+			}
+		}
+		AmigaDebugLogf( "[Amiga] BGRA7 data kind=%d %lux%lu raw0=%02x%02x%02x%02x rawmax=%02x%02x%02x%02x out0=%02x%02x%02x%02x outmax=%02x%02x%02x%02x",
+			TextureUploadSemantic,(unsigned long)Mip->USize,(unsigned long)Mip->VSize,
+			RawStart[0],RawStart[1],RawStart[2],RawStart[3],RawMax[0],RawMax[1],RawMax[2],RawMax[3],
+			UploadBuf[0],UploadBuf[1],UploadBuf[2],UploadBuf[3],OutMax[0],OutMax[1],OutMax[2],OutMax[3] );
+		--GAmigaLightmapTraceRemaining;
+	}
+#endif
 }
 
 void UNOpenGLRenderDevice::UploadTexture( FTextureInfo& Info, UBOOL Masked, UBOOL NewTexture )
@@ -990,8 +1100,8 @@ void UNOpenGLRenderDevice::UploadTexture( FTextureInfo& Info, UBOOL Masked, UBOO
 		return;
 	}
 
-	// Upload all mips on desktop.  Level zero is enough for the non-mipmapped
-	// Amiga fallback and avoids incomplete-texture behaviour in old AmigaMesa.
+	// Upload level zero on Amiga; uploading the UE1 chains makes QuarkTex mark
+	// some textures incomplete and return white for every sample.
 	uclock(ImageCycles);
 #ifdef PLATFORM_AMIGA
 	const INT UploadMipCount = Min( Info.NumMips, 1 );

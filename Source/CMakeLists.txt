@@ -24,6 +24,19 @@ option(BUILD_NULLSOUNDDRV "Build SoundDrv (Null driver)" ON)
 option(BUILD_NOPENALDRV "Build NOpenALDrv" ON)
 option(BUILD_WINDRV "Build WinDrv" OFF)
 option(BUILD_STATIC "Link everything into a single binary" OFF)
+option(AMIGA_USE_OPENAL "Use the Amiga OpenAL/libmodplug audio backend" OFF)
+option(AMIGA_MAX_OPT "Use aggressive 68k speed optimizations" OFF)
+option(AMIGA_EXACT_LIGHT_INDEX "Use the PPC-equivalent single lightmap index on 68k" OFF)
+option(AMIGA_PPC_COLOR_ALIASES "Use the portable PPC packed-light channel aliases on 68k" OFF)
+option(AMIGA_PACKED_LIGHT_COORD "Advance the packed light coordinate with explicit carry on 68k" OFF)
+option(AMIGA_PACKED_LIGHT_OS "Use the original four-tap packed light walk with explicit 32-bit carry on 68k" OFF)
+option(AMIGA_MATCH_LIGHT_CHANNELS "Read packed light channels in the same BBGGRR order as textures" OFF)
+option(LINUX_PPC "Build for 32-bit big-endian PowerPC Linux with SDL 1.2" OFF)
+option(SOFTDRV_LIGHT_TRACE "Write a bounded software-lighting comparison trace" OFF)
+
+if(SOFTDRV_LIGHT_TRACE)
+  add_definitions(-DSOFTDRV_LIGHT_TRACE=1)
+endif()
 
 if(VITA)
   set(BUILD_STATIC ON)
@@ -31,16 +44,26 @@ endif()
 
 if(AMIGA)
   # AmigaOS 3.x has no dlopen-style module loading, so everything is linked
-  # into one executable. libGL.a is fixed-function only: use NOpenGLDrv, not
-  # the shader-based GLES driver.
+  # into one executable.  The combined build contains both the fixed-function
+  # OpenGL renderer and SoftDrv; Unreal.ini selects which one is instantiated
+  # on the next launch.
   set(BUILD_STATIC ON)
   set(BUILD_EDITOR OFF)
-  set(BUILD_SOFTDRV OFF)
+  set(BUILD_SOFTDRV ON)
   set(BUILD_WINDRV OFF)
   set(BUILD_NOPENGLDRV ON)
   set(BUILD_NOPENGLESDRV OFF)
-  set(BUILD_NOPENALDRV OFF)
-  set(BUILD_NULLSOUNDDRV ON)
+  if(AMIGA_USE_OPENAL)
+    set(BUILD_NOPENALDRV ON)
+    set(BUILD_NULLSOUNDDRV OFF)
+    set(OPENAL_INCLUDE_DIR "${AMIGA_SDK_ROOT}/include")
+    set(OPENAL_LIBRARY "${AMIGA_SDK_ROOT}/lib/libopenal-newgcc.a")
+    set(LIBXMP_INCLUDE_DIR "${AMIGA_SDK_ROOT}/include")
+    set(LIBXMP_LIBRARY "${AMIGA_SDK_ROOT}/lib/libmodplug.a")
+  else()
+    set(BUILD_NOPENALDRV OFF)
+    set(BUILD_NULLSOUNDDRV ON)
+  endif()
   # IpDrv (multiplayer) needs AmiTCP socket headers, whose <exec/types.h>
   # types clash with the engine's in the same TU. Off until that's isolated;
   # single-player does not need it.
@@ -67,12 +90,17 @@ target_architecture(TARGET_ARCH)
 
 set(TARGET_IS_X86 FALSE)
 set(TARGET_IS_ARM FALSE)
+set(TARGET_IS_PPC FALSE)
 set(TARGET_IS_64BIT FALSE)
 set(TARGET_IS_BIG_ENDIAN FALSE)
 
 if(AMIGA)
   # TargetArch can't probe a hunk-format cross compiler; set it directly.
   set(TARGET_ARCH "m68k")
+  set(TARGET_IS_BIG_ENDIAN TRUE)
+elseif(LINUX_PPC OR TARGET_ARCH MATCHES "^(ppc|powerpc)")
+  set(TARGET_ARCH "ppc")
+  set(TARGET_IS_PPC TRUE)
   set(TARGET_IS_BIG_ENDIAN TRUE)
 elseif(TARGET_ARCH MATCHES "arm")
   set(TARGET_IS_ARM TRUE)
@@ -138,6 +166,21 @@ if(AMIGA)
   # 68k default. -fno-short-enums keeps enum sizes matching the x86 build.
   add_compile_options(-fno-short-enums)
   add_link_options(-fno-short-enums)
+  if(AMIGA_EXACT_LIGHT_INDEX)
+    add_definitions(-DAMIGA_EXACT_LIGHT_INDEX=1)
+  endif()
+  if(AMIGA_PPC_COLOR_ALIASES)
+    add_definitions(-DAMIGA_PPC_COLOR_ALIASES=1)
+  endif()
+  if(AMIGA_PACKED_LIGHT_COORD)
+    add_definitions(-DAMIGA_PACKED_LIGHT_COORD=1)
+  endif()
+  if(AMIGA_PACKED_LIGHT_OS)
+    add_definitions(-DAMIGA_PACKED_LIGHT_OS=1)
+  endif()
+  if(AMIGA_MATCH_LIGHT_CHANNELS)
+    add_definitions(-DAMIGA_MATCH_LIGHT_CHANNELS=1)
+  endif()
 elseif(TARGET_IS_X86)
   add_definitions(-DPLATFORM_X86)
 elseif(TARGET_IS_ARM)
@@ -148,6 +191,10 @@ elseif(TARGET_IS_ARM)
     add_compile_options(-mno-unaligned-access -fno-optimize-sibling-calls)
     add_link_options(-mno-unaligned-access -Wl,-q)
   endif()
+elseif(TARGET_IS_PPC)
+  add_definitions(-DPLATFORM_PPC)
+  add_compile_options(-mbig-endian -fsigned-char -fno-short-enums)
+  add_link_options(-mbig-endian -fno-short-enums)
 endif()
 
 if(TARGET_IS_BIG_ENDIAN)
@@ -178,6 +225,9 @@ endif()
 
 if(USE_SDL)
   add_definitions(-DPLATFORM_SDL)
+  if(AMIGA OR LINUX_PPC)
+    add_definitions(-DPLATFORM_SDL12_COMPAT)
+  endif()
 endif()
 
 if(MSVC)
@@ -200,27 +250,40 @@ else()
   endif()
   add_compile_options(-ffunction-sections -fno-strict-aliasing)
   add_compile_options(-Wno-write-strings)
+  if(AMIGA AND AMIGA_MAX_OPT)
+    # Kept opt-in: -O3 and loop unrolling can increase executable size and
+    # compile time, while the stable Amiga build remains on -O2.
+    add_compile_options(-O3)
+  endif()
 endif()
 
 # Dependencies
 
 if(USE_SDL)
-  if(AMIGA)
+  if(AMIGA OR LINUX_PPC)
     # SDL 1.2 only. Core/Inc/Amiga holds a SDL2/SDL.h that redirects to the
     # SDL12Compat shim, and must come first on the include path so the
     # engine's #include "SDL2/SDL.h" resolves to it.
     if(NOT DEFINED SDL2_INCLUDE_DIR)
       set(SDL2_INCLUDE_DIR
         "${CMAKE_SOURCE_DIR}/Core/Inc/Amiga"
-        "${CMAKE_SOURCE_DIR}/Core/Inc"
-        "${AMIGA_TOOLCHAIN_ROOT}/include/SDL")
+        "${CMAKE_SOURCE_DIR}/Core/Inc")
+      if(AMIGA)
+        list(APPEND SDL2_INCLUDE_DIR "${AMIGA_TOOLCHAIN_ROOT}/include/SDL")
+      else()
+        list(APPEND SDL2_INCLUDE_DIR "${PPC_LINUX_SYSROOT}/usr/include/SDL")
+      endif()
     endif()
     if(NOT DEFINED SDL2_LIBRARY)
       # Static engine libraries only need the SDL headers.  The final Unreal
       # executable links SDL together with libGL in one ordered group; adding
       # it as a transitive dependency here puts the same archive several times
       # into the final link and differs from known-good Amiga SDL/GL programs.
-      set(SDL2_LIBRARY "")
+      if(AMIGA)
+        set(SDL2_LIBRARY "")
+      else()
+        set(SDL2_LIBRARY "${PPC_LINUX_SYSROOT}/usr/lib/libSDL-1.2.so.0.11.4")
+      endif()
     endif()
   elseif(MSVC)
     if(NOT DEFINED SDL2_INCLUDE_DIR)

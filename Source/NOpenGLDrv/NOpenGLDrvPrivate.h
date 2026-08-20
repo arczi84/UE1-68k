@@ -58,6 +58,7 @@ class DLL_EXPORT UNOpenGLRenderDevice : public URenderDevice
 	// Current state.
 	FLOAT CurrentBrightness;
 	DWORD CurrentPolyFlags;
+	INT TextureUploadSemantic; // 0=regular, 1=lightmap, 2=fogmap
 	FLOAT RProjZ, Aspect;
 	FLOAT RFX2, RFY2;
 	FPlane ColorMod;

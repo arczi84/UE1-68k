@@ -200,7 +200,7 @@ CORE_API void appRequestExit()
 #elif defined(PLATFORM_SDL)
 	SDL_Event Ev;
 	Ev.type = SDL_QUIT;
-#ifndef PLATFORM_AMIGA
+#ifndef PLATFORM_SDL12_COMPAT
 	Ev.quit.timestamp = SDL_GetTicks(); // SDL 1.2 events have no timestamp.
 #endif
 	SDL_PushEvent( &Ev );
@@ -999,6 +999,17 @@ CORE_API UBOOL appMoveFile( const char* Src, const char* Dest )
 	UBOOL Success = MoveFile( Src, Dest )!=0;
 #else
 	UBOOL Success = rename( Src, Dest )==0;
+#ifdef PLATFORM_AMIGA
+	// libnix rename() can fail for otherwise valid AmigaDOS paths containing
+	// parent-directory components (the save path is normally "../Save").
+	// Both files are already closed here, so use a portable copy-and-unlink
+	// fallback.  This also makes quicksave work on mounted host directories.
+	if( !Success && appCopyFile( Src, Dest ) )
+	{
+		appUnlink( Src );
+		Success = 1;
+	}
+#endif
 #endif
 
 	if( !Success )
@@ -1659,10 +1670,24 @@ char* appUnixPath( const char* Path )
 	static char Results[16][1024];
 	static INT Count=0;
 	char* UnixPath = Results[Count++ & 15];
-	char* Cur = UnixPath;
-	appStrncpy( UnixPath, Path, 1024 );
-	while( Cur = strchr( Cur, '\\' ) )
-		*Cur = '/';
+	char* Out = UnixPath;
+	const char* In = Path;
+	while( *In && Out < UnixPath + ARRAY_COUNT(Results[0]) - 1 )
+	{
+		char C = *In++;
+		if( C == '\\' )
+			C = '/';
+#ifdef PLATFORM_AMIGA
+		// AmigaDOS uses repeated '/' to walk up parent directories.  Some
+		// UnrealScript defaults contain doubled backslashes (for example the
+		// Vortex2 start map); after slash conversion those must be folded or
+		// they resolve to a completely different path.
+		if( C == '/' && Out > UnixPath && Out[-1] == '/' )
+			continue;
+#endif
+		*Out++ = C;
+	}
+	*Out = 0;
 	return UnixPath;
 	unguard;
 }

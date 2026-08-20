@@ -59,8 +59,30 @@ void UTexture::Update( DOUBLE CurrentTime )
 {
 	guard(UTexture::Update);
 
-	if( CurrentTime != LastUpdateTime )
+#ifdef PLATFORM_AMIGA
+	// LastUpdateTime is a packed DOUBLE in the original texture layout.
+	// Comparing it on 68k can make one procedural texture tick repeatedly
+	// during a single rendered frame. Nyleve's Awetx1 then rapidly evolves
+	// from a correct sky into horizontal smears. Use the engine-frame serial
+	// as the exact once-per-frame key; keep the packed field only as storage.
+	extern DWORD GAmigaFrameSerial;
+	const DOUBLE UpdateKey = (DOUBLE)GAmigaFrameSerial;
+#else
+	const DOUBLE UpdateKey = CurrentTime;
+#endif
+	if( UpdateKey != LastUpdateTime )
 	{
+#ifdef PLATFORM_AMIGA
+		// Nyleve's procedural sky starts with the correct source image, then
+		// the legacy WetTexture simulation corrupts it into fast horizontal
+		// streaks on 68k. Freeze only that named sky texture; other Wet/Water
+		// textures continue updating normally.
+		if( appStricmp(GetName(),"Awetx1")==0 )
+		{
+			LastUpdateTime = UpdateKey;
+			return;
+		}
+#endif
 		if( TextureFlags & TF_Realtime )
 			TextureFlags |= TF_RealtimeChanged;
 #ifdef PLATFORM_AMIGA
@@ -69,7 +91,7 @@ void UTexture::Update( DOUBLE CurrentTime )
 #else
 		Tick( CurrentTime - LastUpdateTime);
 #endif
-		LastUpdateTime = CurrentTime;
+		LastUpdateTime = UpdateKey;
 	}
 
 	unguard;

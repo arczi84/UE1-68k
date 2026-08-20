@@ -2774,7 +2774,8 @@ void USoftwareRenderDevice::DrawTile( FSceneNode* Frame, FTextureInfo& Texture, 
 	Spr.MinX = appRound(X);
 	Spr.MaxX = appRound(X+XL);
 	Spr.MinY = appRound(Y);
-	Spr.MaxY = appRound(Y+YL); 
+	Spr.MaxY = appRound(Y+YL);
+
 
 	// 'NaN/#IND' coordinate inputs become  0x80000000 on FISTP's and cause occasional crashes in
 	// DrawTile and DrawPoly..
@@ -3019,8 +3020,18 @@ void USoftwareRenderDevice::DrawTile( FSceneNode* Frame, FTextureInfo& Texture, 
 		VL *=InvTexVScale;
 	}
 
-	// 1:1 scaling detector
-	if ( EqualPositiveFloat(XL,UL) && EqualPositiveFloat(YL,VL) ) PolyFlags |= PF_RenderHint;
+	// 1:1 scaling detector.
+	//
+	// This must CLEAR the hint as well as set it. PF_RenderHint is 0x01000000
+	// -- the same bit as PF_Memorized -- so a caller can hand us a tile that
+	// already has it set. The unscaled fast path below then copies texels 1:1
+	// regardless of the real scale: a 128x128 texture drawn into 64x64 (the GT
+	// logo on the intro screen) rendered only its top-left quarter, i.e. it
+	// looked cut in half.
+	if ( EqualPositiveFloat(XL,UL) && EqualPositiveFloat(YL,VL) )
+		PolyFlags |= PF_RenderHint;
+	else
+		PolyFlags &= ~PF_RenderHint;
 
 	// Prepare setup globals structure Spr.
 	if ( (PolyFlags & PF_RenderHint) && !(PolyFlags & (PF_Translucent|PF_Modulated)) )

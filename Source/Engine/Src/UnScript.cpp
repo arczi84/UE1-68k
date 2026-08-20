@@ -864,6 +864,11 @@ void APlayerPawn::execClientMessage( FFrame& Stack, BYTE*& Result )
 	if( Player && Player->IsA(UViewport::StaticClass) )
 		((UViewport*)Player)->Log( NAME_Play, S );
 
+	// The TimeDemo HUD announces a completed flyby cycle by broadcasting
+	// "Result: <fps> FPS (...)".  Watching for it here lets an unattended run
+	// stop on a whole cycle without recompiling the TimeDemo scripts.
+	AutoTimedemoNotifyMessage( S );
+
 	unguardexecSlow;
 }
 AUTOREGISTER_INTRINSIC( APlayerPawn, INDEX_NONE, execClientMessage );
@@ -985,7 +990,7 @@ void AActor::execPollSleep( FFrame& Stack, BYTE*& Result )
 {
 	guardSlow(AActor::execPollSleep);
 
-#ifdef PLATFORM_ARM
+#if defined(PLATFORM_ARM) || defined(PLATFORM_M68K)
 	// try to avoid potential unaligned accesses
 	FLOAT DeltaSeconds = 0.0f;
 	appMemcpy( (void*)&DeltaSeconds, (void*)Result, sizeof(FLOAT) );
@@ -1945,7 +1950,10 @@ void AActor::ProcessState( FLOAT DeltaSeconds )
 			uclock(GScriptCycles);
 
 		// Create a work area for UnrealScript.
-		BYTE Buffer[MAX_CONST_SIZE], *Addr;
+		// Latent intrinsics read DeltaSeconds from this scratch buffer as a
+		// FLOAT.  A byte-aligned stack slot can trigger extremely expensive
+		// address-error emulation on 68k, so give the VM buffer native alignment.
+		BYTE Buffer[MAX_CONST_SIZE] GCC_ALIGN(4), *Addr;
 		*(FLOAT*)Buffer = DeltaSeconds;
 
 		// If a latent action is in progress, update it.

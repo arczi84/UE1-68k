@@ -4087,7 +4087,14 @@ void UFireTexture::PostLoad()
 	if (OldRenderHeat != RenderHeat)
 	{
 		for( INT  T = 0; T<1024; T++ )
-			RenderTable[T] = Clamp( T/4.0 + 1.0 - (255-RenderHeat)/16.0, 0.0, 255.0 );
+		{
+			// Algebraically identical to the original expression, but kept in
+			// fixed-point 1/16 units.  The gcc/libnix 68k double-to-BYTE path
+			// collapses this table toward 0/255, producing monochrome noise and
+			// solid-white flames in every procedural FireTexture.
+			const INT Heat16 = 4*T + 16 - (255-(INT)RenderHeat);
+			RenderTable[T] = (BYTE)Clamp( Heat16 / 16, 0, 255 );
+		}
 		OldRenderHeat = RenderHeat;
 	}
 

@@ -9,6 +9,15 @@
 
 #include "RenderPrivate.h"
 
+#ifndef SOFTDRV_LIGHT_TRACE
+#define SOFTDRV_LIGHT_TRACE 0
+#endif
+
+#if SOFTDRV_LIGHT_TRACE
+void SoftLightTraceBeginFrame( INT Frame, INT Width, INT Height, INT ColorBytes, DWORD Caps );
+void SoftLightTraceEndFrame();
+#endif
+
 /*------------------------------------------------------------------------------------
 	Software rendering private definitions.
 ------------------------------------------------------------------------------------*/
@@ -18,9 +27,19 @@
 #define GIsMMX false
 #endif
 
-// Maximum supported sizes. 
-#define MaximumYScreenSize  1200   
+// Maximum supported sizes.
+#define MaximumYScreenSize  1200
 #define MaximumXScreenSize  2048
+
+// Deterministic rasteriser work counters, for comparing two builds without
+// relying on framerate.  Wall-clock FPS under emulation was measured swinging
+// 17% between runs of an identical binary, which hides any realistic gain;
+// these counts depend only on what the CPU was asked to draw, so for a fixed
+// benchmark path they repeat exactly.  Build with -DSOFTDRV_PIXEL_STATS=1 and
+// read PROGDIR:pixel-stats.txt after the engine exits.
+#ifndef SOFTDRV_PIXEL_STATS
+#define SOFTDRV_PIXEL_STATS 0
+#endif
 
 
 // Coarse fast square root approximation
@@ -41,11 +60,15 @@ void SetupFastSqrt();
 inline unsigned int _rotl( unsigned int a, int s )
 {
 	s &= 31;
+	if( s == 0 )
+		return a;
 	return (a << s) | (a >> (32 - s));
 }
 inline unsigned int _rotr( unsigned int a, int s )
 {
 	s &= 31;
+	if( s == 0 )
+		return a;
 	return (a >> s) | (a << (32 - s));
 }
 #endif
@@ -79,7 +102,14 @@ union FMMX
 #if __INTEL_BYTE_ORDER__
 		BYTE SB1, SG1, SR1, SA1, SR2, SG2, SB2, SA2;
 #else
-		BYTE SA2, SR2, SG2, SB2, SA1, SB1, SG1, SR1;
+		// Both halves are numeric 0x00BBGGRR.  PPC uses the original portable
+		// big-endian aliases; keep the current 68k experiment isolated until the
+		// Amiga stripe fault is resolved independently.
+#if defined(PLATFORM_AMIGA) && !AMIGA_PPC_COLOR_ALIASES
+		BYTE SA2, SB2, SG2, SR2, SA1, SR1, SG1, SB1;
+#else
+		BYTE SA2, SB2, SG2, SR2, SA1, SB1, SG1, SR1;
+#endif
 #endif
 	};
 

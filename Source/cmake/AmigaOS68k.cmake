@@ -53,14 +53,15 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 # CRASHES gcc 6.5 (internal compiler error / segfault on UnCache.cpp etc.), so
 # it can't be used. Alignment must be handled another way (see UnGcc.h GCC_ALIGN
 # usage / per-field alignment, or an alignment attribute on the base types).
-# -mhard-float: emit FPU instructions (fmul/fadd/fmove) instead of soft-float
-# calls (___mulsf3/___addsf3). gcc 6.5 targeting -m68040 defaults to SOFT float,
-# and soft-float combined with -ffast-math produces wrong FP results — which made
-# the mesh vertex transform (ComputeOutcode/TransformPointBy) yield garbage, so
-# every vertex was outcode-rejected and meshes rendered invisible. 68040/68060
-# have an on-chip FPU so hard-float is correct and far faster. Must be applied to
-# ALL translation units (C and C++) for a consistent float ABI.
-set(AMIGA_COMMON_FLAGS "-noixemul -m${AMIGA_CPU} -mhard-float -fomit-frame-pointer -ffast-math -fno-PIC -fno-pic")
+# GCC generates code for the requested CPU. Its Amiga linker maps hard-float
+# runtime libraries through the libm020/libm881 multilib directories; this does
+# not downgrade application code from 68040 to 68020.
+# Keep hard-float opt-in so the known-good soft build remains untouched.
+if(AMIGA_HARD_FLOAT)
+  set(AMIGA_COMMON_FLAGS "-noixemul -m${AMIGA_CPU} -mhard-float -fomit-frame-pointer -ffast-math -fno-PIC -fno-pic")
+else()
+  set(AMIGA_COMMON_FLAGS "-noixemul -m${AMIGA_CPU} -fomit-frame-pointer -ffast-math -fno-PIC -fno-pic")
+endif()
 
 # C++ standard library graft for the AmigaPorts gcc 15 build.
 # That toolchain ships m68k-amigaos-g++ (cc1plus works) but was built WITHOUT

@@ -472,6 +472,7 @@ class RENDER_API URender : public URenderBase
 	DWORD					PolysDraw;
 
 	// Which stats to display.
+	UBOOL FpsOnly;
 	UBOOL FpsStats;
 	UBOOL GlobalStats;
 	UBOOL MeshStats;

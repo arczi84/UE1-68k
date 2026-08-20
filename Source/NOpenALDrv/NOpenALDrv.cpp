@@ -6,10 +6,14 @@
 #include "AL/alext.h"
 #include "AL/efx.h"
 #include "AL/efx-presets.h"
-#include "xmp.h"
-
 #include "NOpenALDrvPrivate.h"
 #include "UnRender.h"
+
+#ifdef PLATFORM_AMIGA
+extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+static INT GAmigaMusicTraceRemaining = 12;
+static UMusic* GAmigaPcmTracedMusic = (UMusic*)1;
+#endif
 
 /*-----------------------------------------------------------------------------
 	Global implementation.
@@ -48,7 +52,10 @@ UNOpenALAudioSubsystem::UNOpenALAudioSubsystem()
 	DopplerFactor = 0.01f;
 	UseHRTF = true;
 	UseReverb = true;
-	MusicInterpolation = XMP_INTERP_LINEAR;
+	MusicInterpolation = MODPLUG_RESAMPLE_LINEAR;
+#ifdef PLATFORM_AMIGA
+	StartupFadeStep = 0;
+#endif
 }
 
 UBOOL UNOpenALAudioSubsystem::Init()
@@ -75,8 +82,8 @@ UBOOL UNOpenALAudioSubsystem::Init()
 
 	AmbientFactor = Clamp( AmbientFactor, 0.f, 1.f );
 
-	if( MusicInterpolation > XMP_INTERP_SPLINE )
-		MusicInterpolation = XMP_INTERP_SPLINE;
+	if( MusicInterpolation > MODPLUG_RESAMPLE_FIR )
+		MusicInterpolation = MODPLUG_RESAMPLE_FIR;
 
 	const ALint AttrList[] = {
 		ALC_FREQUENCY, OutputRate,
@@ -101,16 +108,33 @@ UBOOL UNOpenALAudioSubsystem::Init()
 	alDistanceModel( AL_LINEAR_DISTANCE_CLAMPED );
 	alDopplerFactor( Max( 0.f, DopplerFactor ) );
 	alListenerf( AL_METERS_PER_UNIT, DISTANCE_SCALE );
+#ifdef PLATFORM_AMIGA
+	// AHI may begin consuming its first block as soon as the context becomes
+	// current. Start muted and ramp up from Update() to avoid a startup pop.
+	alListenerf( AL_GAIN, 0.f );
+	StartupFadeStep = 0;
+#else
 	alListenerf( AL_GAIN, MasterVolume / 255.f );
+#endif
 
+#ifdef PLATFORM_AMIGA
+	// Reserve the music source before the effect pool. The legacy AHI mixer
+	// can allocate more than 64 OpenAL source objects but does not reliably
+	// mix the source created after a 64-source effects block.
+	alGenSources( 1, &MusicSource );
 	alGenSources( MAX_SOURCES, Sources );
-
-	alGenSources( 1, &MusicSource	);
+#else
+	alGenSources( MAX_SOURCES, Sources );
+	alGenSources( 1, &MusicSource );
+#endif
 	alSourcei( MusicSource, AL_SOURCE_RELATIVE, AL_TRUE );
 	alSource3f( MusicSource, AL_POSITION, 0.f, 0.f, 0.f );
 	alSourcef( MusicSource, AL_ROLLOFF_FACTOR, 0.f );
 	alSourcef( MusicSource, AL_GAIN, MusicVolume / 255.f );
 
+	// Do not rely on zero-filled object/BSS storage with the 68k -noixemul
+	// startup. OpenAL must initially receive actual digital silence.
+	appMemset( MusicBufferData, 0, sizeof( MusicBufferData ) );
 	alGenBuffers( ARRAY_COUNT( MusicBuffers ), MusicBuffers );
 	for( INT i = 0; i < ARRAY_COUNT( MusicBuffers ); ++i )
 	{
@@ -131,15 +155,40 @@ UBOOL UNOpenALAudioSubsystem::Init()
 	for( INT i = 0; i < MAX_SOURCES; ++i )
 		Voices[i].Buffer = INVALID_BUFFER;
 
-	MusicCtx = xmp_create_context();
-	xmp_set_player( MusicCtx, XMP_PLAYER_INTERP, MusicInterpolation );
+	MusicFile = NULL;
+	Music = NULL;
+	MusicFade = 1.f;
+	MusicTime = appSeconds();
+	MusicSection = 255;
+	MusicIsPlaying = false;
+	MusicIsLoaded = false;
+	ModPlug_Settings ModSettings;
+	ModPlug_GetSettings( &ModSettings );
+	ModSettings.mFlags = 0;
+	ModSettings.mChannels = 2;
+	ModSettings.mBits = 16;
+	ModSettings.mFrequency = OutputRate;
+	ModSettings.mResamplingMode = Clamp( (INT)MusicInterpolation, (INT)MODPLUG_RESAMPLE_NEAREST, (INT)MODPLUG_RESAMPLE_FIR );
+	ModSettings.mStereoSeparation = 128;
+	ModSettings.mMaxMixChannels = 64;
+	ModSettings.mLoopCount = -1;
+	ModPlug_SetSettings( &ModSettings );
 
 	// Set ourselves up as the audio subsystem.
 	USound::Audio = this;
 	UMusic::Audio = this;
 
 	// Spawn music streaming thread.
+#ifdef PLATFORM_AMIGA
+	// The legacy 68k OpenAL/AHI implementation is not thread-safe and keeps
+	// its context on the creating task.  Calling alBufferData/alSourceQueue*
+	// from the music worker deadlocks it against the main audio update shortly
+	// after the first frame.  Stream incrementally from Update() instead.
+	MusicThread = NULL;
+	MusicThreadRunning = false;
+#else
 	StartMusicThread();
+#endif
 
 	return true;
 
@@ -155,11 +204,10 @@ void UNOpenALAudioSubsystem::Destroy()
 	USound::Audio = NULL;
 	UMusic::Audio = NULL;
 
-	if( MusicCtx )
+	if( MusicFile )
 	{
-		xmp_end_player( MusicCtx );
-		xmp_free_context( MusicCtx );
-		MusicCtx = NULL;
+		ModPlug_Unload( MusicFile );
+		MusicFile = NULL;
 	}
 
 	if (UseReverb)
@@ -204,10 +252,10 @@ void UNOpenALAudioSubsystem::ShutdownAfterError()
 	UMusic::Audio = NULL;
 
 	// Shutdown contexts without touching anything else.
-	if( MusicCtx )
+	if( MusicFile )
 	{
-		xmp_free_context( MusicCtx );
-		MusicCtx = NULL;
+		ModPlug_Unload( MusicFile );
+		MusicFile = NULL;
 		Music = NULL;
 	}
 	if (UseReverb)
@@ -243,7 +291,7 @@ void UNOpenALAudioSubsystem::PostEditChange()
 	if( DopplerFactor < 0.f )
 		DopplerFactor = 0.f;
 	AmbientFactor = Clamp( AmbientFactor, 0.f, 1.f );
-	MusicInterpolation = Clamp( MusicInterpolation, (BYTE)0, (BYTE)XMP_INTERP_SPLINE );
+	MusicInterpolation = Clamp( MusicInterpolation, (BYTE)MODPLUG_RESAMPLE_NEAREST, (BYTE)MODPLUG_RESAMPLE_FIR );
 
 	if( Ctx )
 	{
@@ -253,10 +301,8 @@ void UNOpenALAudioSubsystem::PostEditChange()
 		// Voice volumes will be updated in Update().
 	}
 
-	if( MusicCtx )
-	{
-		xmp_set_player( MusicCtx, XMP_PLAYER_INTERP, MusicInterpolation );
-	}
+	// ModPlug's output format and resampler are selected before the module is
+	// loaded.  A changed setting therefore applies on the next song load.
 
 	unguard;
 }
@@ -269,8 +315,22 @@ void UNOpenALAudioSubsystem::SetViewport( UViewport* InViewport )
 	for( INT i = 0; i < MAX_SOURCES; ++i )
 		StopVoice( i );
 
-	// Stop and free music if the viewport has changed.
-	if( InViewport != Viewport )
+	// Stop and free music when the viewport really changes.
+	UBOOL MapIsLoading = false;
+#ifdef PLATFORM_AMIGA
+	// UGameEngine marks the old level LEVACT_Loading immediately before its
+	// first SetViewport() at a real LoadMap boundary. This distinguishes that
+	// call from harmless repeated SetViewport() calls during startup and from
+	// the second call after the new map has initialized. Clear only the old
+	// stream here; the new map's MusicEvents still choose the next track.
+	MapIsLoading =
+		InViewport == Viewport &&
+		InViewport &&
+		InViewport->Actor &&
+		InViewport->Actor->XLevel &&
+		InViewport->Actor->XLevel->GetLevelInfo()->LevelAction == LEVACT_Loading;
+#endif
+	if( InViewport != Viewport || MapIsLoading )
 	{
 		if( Music )
 		{
@@ -284,30 +344,49 @@ void UNOpenALAudioSubsystem::SetViewport( UViewport* InViewport )
 	unguard;
 }
 
+void UNOpenALAudioSubsystem::Serialize( FArchive& Ar )
+{
+	guard(UNOpenALAudioSubsystem::Serialize)
+
+	Super::Serialize( Ar );
+
+	// Music is runtime state and must not become part of a saved package, but
+	// the reference collector must see it.  Otherwise map/save garbage
+	// collection can purge the UMusic while libmodplug is still using its
+	// decoded data, leaving a non-null pointer whose object name is blank.
+	if( !Ar.IsLoading() && !Ar.IsSaving() )
+		Ar << Music;
+
+	unguard;
+}
+
 void UNOpenALAudioSubsystem::RegisterMusic( UMusic* Music )
 {
 	guard(UNOpenALAudioSubsystem::RegisterMusic)
 
 	FScopedLock Lock( MusicMutex );
 
-	if( Music->Handle || !Music->Data.Num() )
+	if( !Music->Data.Num() )
 		return;
 
-	INT Err = xmp_load_module_from_memory( MusicCtx, &Music->Data(0), Music->Data.Num() );
-	if( Err < 0 )
+	// Handle is only a marker; MusicFile owns the real decoder.  A save/map
+	// transition can leave the marker set after the decoder was released.
+	if( Music->Handle && MusicFile && MusicIsLoaded )
+		return;
+	if( Music->Handle )
+		Music->Handle = NULL;
+
+	if( MusicFile )
 	{
-		debugf( NAME_Warning, "Couldn't load music `%s`: %d", Music->GetName(), Err );
+		ModPlug_Unload( MusicFile );
+		MusicFile = NULL;
+	}
+	MusicFile = ModPlug_Load( &Music->Data(0), Music->Data.Num() );
+	if( !MusicFile )
+	{
+		debugf( NAME_Warning, "Couldn't load music `%s` with libmodplug", Music->GetName() );
 		return;
 	}
-
-	Err = xmp_start_player( MusicCtx, OutputRate, 0 );
-	if( Err < 0 )
-	{
-		xmp_release_module( MusicCtx );
-		debugf( NAME_Warning, "Couldn't start player on `%s`: %d", Music->GetName(), Err );
-		return;
-	}
-
 	Music->Handle = (void*)1;
 	MusicIsLoaded = true;
 
@@ -322,14 +401,14 @@ void UNOpenALAudioSubsystem::UnregisterMusic( UMusic* Music )
 
 	StopMusic();
 	ClearMusicBuffers();
-	if( MusicCtx )
+	if( MusicFile )
 	{
-		xmp_end_player( MusicCtx );
-		if( MusicIsLoaded )
-			xmp_release_module( MusicCtx );
+		ModPlug_Unload( MusicFile );
+		MusicFile = NULL;
 	}
 
 	MusicIsLoaded = false;
+	Music->Handle = NULL;
 
 	unguard;
 }
@@ -447,11 +526,34 @@ void UNOpenALAudioSubsystem::UpdateVoice( INT Num, const ENVoiceOp Op )
 	// Set up AL source.
 	ALuint Source = Sources[Num];
 	alSourcei( Source, AL_SOURCE_RELATIVE, SourceRelative );
-	alSourcef( Source, AL_GAIN, Voice.Volume * ( SoundVolume / 255.f ) );
+	FLOAT SourceGain = Voice.Volume * ( SoundVolume / 255.f );
+#ifdef PLATFORM_AMIGA
+	// The legacy Amiga OpenAL/AHI implementation does not reliably apply the
+	// selected distance model.  Do the same linear-clamped attenuation here so
+	// large-radius ambient actors (fans, wind, machinery) do not mask nearby
+	// one-shot sounds such as the Vortex alarm.
+	if( !SourceRelative && Voice.Radius > 0.f )
+	{
+		const FLOAT Distance = ( Voice.Location - ListenerCoords.Origin ).Size();
+		const FLOAT ReferenceDistance = Voice.Radius * DESPATIALIZE_FACTOR;
+		FLOAT Attenuation = 1.f;
+		if( Distance > ReferenceDistance )
+		{
+			const FLOAT Range = Max( Voice.Radius - ReferenceDistance, 1.f );
+			Attenuation = Clamp( 1.f - ROLLOFF_FACTOR * ( Distance - ReferenceDistance ) / Range, 0.f, 1.f );
+		}
+		SourceGain *= Attenuation;
+	}
+#endif
+	alSourcef( Source, AL_GAIN, SourceGain );
 	alSourcef( Source, AL_PITCH, Voice.Pitch );
 	alSourcef( Source, AL_MAX_DISTANCE, Voice.Radius );
 	alSourcef( Source, AL_REFERENCE_DISTANCE, Voice.Radius * DESPATIALIZE_FACTOR );
+#ifdef PLATFORM_AMIGA
+	alSourcef( Source, AL_ROLLOFF_FACTOR, 0.f );
+#else
 	alSourcef( Source, AL_ROLLOFF_FACTOR, ROLLOFF_FACTOR );
+#endif
 	alSourcefv( Source, AL_POSITION, &ALLocation.X );
 	alSourcefv( Source, AL_VELOCITY, &ALVelocity.X );
 	alSourcei( Source, AL_LOOPING, Voice.Looping );
@@ -606,14 +708,22 @@ void UNOpenALAudioSubsystem::PlayMusic()
 
 	alSourceStop(MusicSource);
 	ClearMusicBuffers();
-	xmp_set_position( MusicCtx, MusicSection );
+	if( MusicFile )
+		ModPlug_SeekOrder( MusicFile, MusicSection );
 
+	MusicIsPlaying = true;
+#ifdef PLATFORM_AMIGA
+	// Do not call alSourcePlay on an empty streaming source. The legacy
+	// OpenAL/AHI backend can then consume the later queue while remaining
+	// inaudible. Queue the first decoded block synchronously; the buffer
+	// updater starts the source only after the queue is non-empty.
+	UpdateMusicBuffers();
+#else
 	ALint State = 0;
 	alGetSourcei( MusicSource, AL_SOURCE_STATE, &State );
 	if( State != AL_PLAYING )
 		alSourcePlay( MusicSource );
-
-	MusicIsPlaying = true;
+#endif
 
 	unguard;
 }
@@ -636,6 +746,16 @@ void UNOpenALAudioSubsystem::Update( FPointRegion Region, FCoords& Listener )
 
 	if( !Viewport || !Viewport->IsRealtime() )
 		return;
+
+#ifdef PLATFORM_AMIGA
+	// Eight updates are long enough for the AHI ring buffers and the first
+	// ambient sources to settle, without delaying normal audio noticeably.
+	const INT StartupFadeSteps = 8;
+	const FLOAT StartupGain = Clamp( StartupFadeStep / (FLOAT)StartupFadeSteps, 0.f, 1.f );
+	alListenerf( AL_GAIN, StartupGain * MasterVolume / 255.f );
+	if( StartupFadeStep < StartupFadeSteps )
+		++StartupFadeStep;
+#endif
 
 	// Update AL listener position, velocity and orientation.
 	FVector ALPosition;
@@ -759,8 +879,21 @@ void UNOpenALAudioSubsystem::Update( FPointRegion Region, FCoords& Listener )
 	DOUBLE DeltaTime = appSeconds() - MusicTime;
 	MusicTime += DeltaTime;
 	DeltaTime = Clamp( DeltaTime, 0.0, 1.0 );
-	if( Viewport->Actor && Viewport->Actor->Transition != MTRAN_None )
+	if
+	(	Viewport->Actor
+	&&	Viewport->Actor->Transition != MTRAN_None )
 	{
+#ifdef PLATFORM_AMIGA
+		if( GAmigaMusicTraceRemaining > 0 )
+		{
+			AmigaDebugLogf( "[Amiga] AUTOMUSIC transition current=%s requested=%s section=%d transition=%d playing=%d loaded=%d free=%d",
+				Music ? Music->GetName() : "None",
+				Viewport->Actor->Song ? Viewport->Actor->Song->GetName() : "None",
+				(INT)Viewport->Actor->SongSection, (INT)Viewport->Actor->Transition,
+				(INT)MusicIsPlaying, (INT)MusicIsLoaded, NumFreeMusicBuffers );
+			--GAmigaMusicTraceRemaining;
+		}
+#endif
 		// Track is changing.
 		UBOOL MusicChanged = Music != Viewport->Actor->Song;
 		if( Music )
@@ -814,6 +947,11 @@ void UNOpenALAudioSubsystem::Update( FPointRegion Region, FCoords& Listener )
 			alSourcef( MusicSource, AL_GAIN, Max(MusicFade, 0.f) * MusicVolume / 255.f );
 			Music = Viewport->Actor->Song;
 			MusicSection = Viewport->Actor->SongSection;
+#ifdef PLATFORM_AMIGA
+			// Give every newly selected module its own small diagnostic budget;
+			// the intro must not consume all entries before dusk.umx starts.
+			GAmigaMusicTraceRemaining = 8;
+#endif
 			if( Music )
 			{
 				if( MusicChanged )
@@ -826,6 +964,11 @@ void UNOpenALAudioSubsystem::Update( FPointRegion Region, FCoords& Listener )
 			Viewport->Actor->Transition = MTRAN_None;
 		}
 	}
+
+#ifdef PLATFORM_AMIGA
+	// Keep every OpenAL call on the task which owns the context.
+	UpdateMusicBuffers();
+#endif
 
 	unguard;
 }
@@ -850,18 +993,68 @@ void UNOpenALAudioSubsystem::UpdateMusicBuffers()
 		NumFreeMusicBuffers += NumToUnqueue;
 	}
 
-	if( !Music || !MusicIsPlaying || MusicSection == 255 || !MusicCtx )
+	if( !Music || !MusicIsPlaying || MusicSection == 255 || !MusicFile )
 		return;
 
-	// If music is playing, render and queue more buffers if available
-	while( BuffersQueued < NUM_MUSIC_BUFFERS && NumFreeMusicBuffers )
+#ifdef PLATFORM_AMIGA
+	if( GAmigaMusicTraceRemaining > 0 )
 	{
-		if( xmp_play_buffer( MusicCtx, MusicBufferData, sizeof( MusicBufferData ), 0 ) < 0 )
-			break;
-		alBufferData( FreeMusicBuffers[NumFreeMusicBuffers - 1], AL_FORMAT_STEREO16, MusicBufferData, sizeof( MusicBufferData ), OutputRate );
+		AmigaDebugLogf( "[Amiga] AUTOMUSIC stream song=%s section=%d state=%d queued=%d processed=%d free=%d",
+			Music->GetName(), (INT)MusicSection, (INT)State,
+			(INT)BuffersQueued, (INT)BuffersProcessed, NumFreeMusicBuffers );
+		--GAmigaMusicTraceRemaining;
+	}
+#endif
+
+	// If music is playing, render and queue more buffers if available.  A 68k
+	// fills one 32K block per game update to avoid a long first-frame stall.
+	INT BuffersFilled = 0;
+	while( BuffersQueued < NUM_MUSIC_BUFFERS && NumFreeMusicBuffers
+#ifdef PLATFORM_AMIGA
+		&& BuffersFilled < 1
+#endif
+	)
+	{
+		INT Read = ModPlug_Read( MusicFile, MusicBufferData, sizeof( MusicBufferData ) );
+		if( Read <= 0 )
+		{
+			ModPlug_SeekOrder( MusicFile, MusicSection );
+			Read = ModPlug_Read( MusicFile, MusicBufferData, sizeof( MusicBufferData ) );
+			if( Read <= 0 )
+				break;
+		}
+#ifdef PLATFORM_AMIGA
+		if( Music != GAmigaPcmTracedMusic )
+		{
+			INT NonZero = 0;
+			INT MaxLE = 0;
+			INT MaxBE = 0;
+			for( INT i=0; i<Read; ++i )
+				NonZero += MusicBufferData[i] != 0;
+			for( INT i=0; i+1<Read; i+=2 )
+			{
+				const INT LE = (INT)(short)(MusicBufferData[i] | (MusicBufferData[i+1]<<8));
+				const INT BE = (INT)(short)((MusicBufferData[i]<<8) | MusicBufferData[i+1]);
+				MaxLE = Max(MaxLE,Abs(LE));
+				MaxBE = Max(MaxBE,Abs(BE));
+			}
+			ALfloat SourceGain = -1.f;
+			ALfloat ListenerGain = -1.f;
+			alGetSourcef( MusicSource, AL_GAIN, &SourceGain );
+			alGetListenerf( AL_GAIN, &ListenerGain );
+			AmigaDebugLogf( "[Amiga] AUTOMUSIC pcm song=%s read=%d nonzero=%d maxLE=%d maxBE=%d sourceGain=%.3f listenerGain=%.3f alError=%d",
+				Music->GetName(), Read, NonZero, MaxLE, MaxBE,
+				SourceGain, ListenerGain, (INT)alGetError() );
+			GAmigaPcmTracedMusic = Music;
+		}
+#endif
+		if( Read < (INT)sizeof(MusicBufferData) )
+			appMemset( MusicBufferData + Read, 0, sizeof(MusicBufferData) - Read );
+		alBufferData( FreeMusicBuffers[NumFreeMusicBuffers - 1], AL_FORMAT_STEREO16, MusicBufferData, Read, OutputRate );
 		alSourceQueueBuffers( MusicSource, 1, &FreeMusicBuffers[NumFreeMusicBuffers - 1] );
 		--NumFreeMusicBuffers;
 		++BuffersQueued;
+		++BuffersFilled;
 	}
 
 	// If it stopped because it ran out of buffers, restart it
@@ -880,10 +1073,17 @@ void UNOpenALAudioSubsystem::ClearMusicBuffers()
 	appMemset( (void*)MusicBufferData, 0, sizeof(MusicBufferData) );
 
 	ALint BuffersProcessed = 0;
+	ALint BuffersQueued = 0;
 	alGetSourcei( MusicSource, AL_BUFFERS_PROCESSED, &BuffersProcessed );
-	if( BuffersProcessed > 0 && NumFreeMusicBuffers < NUM_MUSIC_BUFFERS )
+	alGetSourcei( MusicSource, AL_BUFFERS_QUEUED, &BuffersQueued );
+	// ClearMusicBuffers is only called after alSourceStop(). OpenAL specifies
+	// that every queued buffer is then processed, but the 68k implementation
+	// can still report AL_BUFFERS_PROCESSED=0. In that case the old flyby
+	// buffers never return to the pool and dusk.umx has nothing to queue.
+	const INT BuffersAvailable = Max( BuffersProcessed, BuffersQueued );
+	if( BuffersAvailable > 0 && NumFreeMusicBuffers < NUM_MUSIC_BUFFERS )
 	{
-		const INT NumToUnqueue = Min( NUM_MUSIC_BUFFERS - NumFreeMusicBuffers, BuffersProcessed );
+		const INT NumToUnqueue = Min( NUM_MUSIC_BUFFERS - NumFreeMusicBuffers, BuffersAvailable );
 		alSourceUnqueueBuffers( MusicSource, NumToUnqueue, &FreeMusicBuffers[NumFreeMusicBuffers] );
 		NumFreeMusicBuffers += NumToUnqueue;
 	}
@@ -969,12 +1169,12 @@ UBOOL UNOpenALAudioSubsystem::Exec( const char* Cmd, FOutputDevice* Out )
 
 	if( ParseCommand( &Cmd, "MusicOrder") )
 	{
-		if( Music && MusicCtx )
+		if( Music && MusicFile )
 		{
 			FScopedLock Lock( MusicMutex );
 			INT Pos = atoi( Cmd );
 			Out->Logf( "Set music position to %d", Pos );
-			xmp_set_position( MusicCtx, Pos );
+			ModPlug_SeekOrder( MusicFile, Pos );
 			MusicSection = Pos;
 			return true;
 		}
@@ -982,9 +1182,7 @@ UBOOL UNOpenALAudioSubsystem::Exec( const char* Cmd, FOutputDevice* Out )
 	else if( ParseCommand( &Cmd, "MusicInterp" ) )
 	{
 		FScopedLock Lock( MusicMutex );
-		MusicInterpolation = Clamp( atoi( Cmd ), 0, XMP_INTERP_SPLINE );
-		if( MusicCtx )
-			xmp_set_player( MusicCtx, XMP_PLAYER_INTERP, MusicInterpolation );
+		MusicInterpolation = Clamp( atoi( Cmd ), (INT)MODPLUG_RESAMPLE_NEAREST, (INT)MODPLUG_RESAMPLE_FIR );
 		return true;
 	}
 

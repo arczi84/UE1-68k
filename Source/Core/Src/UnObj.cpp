@@ -124,7 +124,9 @@ UBOOL UObject::IsValid()
 	}
 	else if( GObj.Objects(GetIndex())!=this )
 	{
+#ifndef PLATFORM_AMIGA
 		debugf( NAME_Warning, "Unlisted object" );
+#endif
 		return 0;
 	}
 	else return 1;
@@ -822,6 +824,12 @@ void UObject::SaveConfig( DWORD Flags, const char* Filename )
 		for( TObjectIterator<UClass> It; It; ++It )
 			if( It->IsChildOf(BaseClass) )
 				It->GetDefaultObject()->LoadConfig( NAME_Config );
+#ifdef PLATFORM_AMIGA
+	// The Amiga launcher deliberately bypasses global C++ destructors during
+	// final process exit.  FConfigCache's destructor therefore cannot be relied
+	// on to flush menu changes.  Persist each explicit SaveConfig immediately.
+	SaveAllConfigs();
+#endif
 	unguard;
 }
 

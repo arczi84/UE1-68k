@@ -877,6 +877,17 @@ UBOOL ULevel::MoveActor
 	INT     MaybeTouched   = 0;
 	INT     NumHits        = 0;
 	FCheckResult* FirstHit = NULL;
+#ifdef PLATFORM_AMIGA
+	// Decorative flock pawns inherit full pawn collision. On 68k, sweeping
+	// every bird/rabbit against every dynamic actor dominates open Nyleve.
+	// Keep BSP/world collision and keep them in the actor hash (visible and
+	// shootable), but omit dynamic-actor hits while the flock pawn moves.
+	const char* AmigaMoveClass = Actor->GetClass()->GetName();
+	const UBOOL AmigaFlockWorldOnly =
+		Actor->IsA(APawn::StaticClass) &&
+		( appStricmp(AmigaMoveClass,"Bird1")==0
+		|| appStricmp(AmigaMoveClass,"NaliRabbit")==0 );
+#endif
 
 	// Perform movement collision checking if needed for this actor.
 	if( (Actor->bCollideActors || Actor->bCollideWorld) && !Actor->IsMovingBrush() && Delta!=FVector(0,0,0) )
@@ -888,7 +899,11 @@ UBOOL ULevel::MoveActor
 			Actor->Location + TestDelta,
 			Actor->Location,
 			Actor->GetCylinderExtent(),
-			(Actor->bCollideActors && !Actor->IsMovingBrush()) ? 1              : 0,
+			(Actor->bCollideActors && !Actor->IsMovingBrush()
+#ifdef PLATFORM_AMIGA
+				&& !AmigaFlockWorldOnly
+#endif
+			) ? 1 : 0,
 			(Actor->bCollideWorld  && !Actor->IsMovingBrush()) ? GetLevelInfo() : NULL,
 			0
 		);

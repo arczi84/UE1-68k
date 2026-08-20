@@ -24,7 +24,7 @@ if(BUILD_STATIC)
   list(APPEND SRC_FILES "Src/UnStaticExports.cpp")
 endif()
 
-if(AMIGA)
+if(AMIGA OR LINUX_PPC)
   # SDL2-on-SDL1.2 compatibility shim.
   list(APPEND SRC_FILES "Src/SDL12Compat.cpp")
 endif()

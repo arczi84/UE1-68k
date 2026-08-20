@@ -61,10 +61,33 @@ UBOOL USoftwareRenderDevice::Init( UViewport* InViewport )
 	unguardSlow;
 }
 
+#if SOFTDRV_PIXEL_STATS
+extern QWORD GSoftDrvMergePixels;
+extern QWORD GSoftDrvMergeCalls;
+#endif
+
 void USoftwareRenderDevice::Exit()
 {
 	guardSlow(USoftwareRenderDevice::Exit);
 
+#if SOFTDRV_PIXEL_STATS
+	// Deterministic work counters for comparing builds; see the comment on
+	// SOFTDRV_PIXEL_STATS in DrawSurf.cpp.
+	{
+		FILE* F = fopen( "PROGDIR:pixel-stats.txt", "w" );
+		if( F )
+		{
+			fprintf( F, "MergePass1516 calls  = %lu\n",
+				(unsigned long)GSoftDrvMergeCalls );
+			fprintf( F, "MergePass1516 pixels = %lu\n",
+				(unsigned long)GSoftDrvMergePixels );
+			if( GSoftDrvMergeCalls )
+				fprintf( F, "pixels per call      = %lu\n",
+					(unsigned long)( GSoftDrvMergePixels / GSoftDrvMergeCalls ) );
+			fclose( F );
+		}
+	}
+#endif
 
 	unguardSlow;
 }
@@ -91,6 +114,17 @@ void USoftwareRenderDevice::Lock( FPlane InFlashScale, FPlane InFlashFog, FPlane
 	check(Viewport->ScreenPointer);
 
 	FrameLocksCounter++; // Software frame counter. 
+
+#if SOFTDRV_LIGHT_TRACE
+	SoftLightTraceBeginFrame
+	(
+		FrameLocksCounter,
+		Viewport->SizeX,
+		Viewport->SizeY,
+		Viewport->ColorBytes,
+		Viewport->Caps
+	);
+#endif
 
 	GByteStride = Viewport->Stride * Viewport->ColorBytes ;
 
@@ -189,6 +223,10 @@ void USoftwareRenderDevice::Lock( FPlane InFlashScale, FPlane InFlashFog, FPlane
 void USoftwareRenderDevice::Unlock( UBOOL Blit )
 {
 	guardSlow(USoftwareRenderDevice::Unlock);
+
+#if SOFTDRV_LIGHT_TRACE
+	SoftLightTraceEndFrame();
+#endif
 
 	check(HitStack.Num()==0);
 	if( HitSize )

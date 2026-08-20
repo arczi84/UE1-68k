@@ -19,7 +19,10 @@
 	inline UBOOL IsPlayer() const;
 	inline UBOOL IsOwnedBy( const AActor *TestOwner ) const;
 	FLOAT WorldLightRadius() const {return 25.0 * ((int)LightRadius+1);}
-	FLOAT WorldSoundRadius() const {return 25.0 * ((int)SoundRadius+1);}
+	// Keep this calculation in single precision.  The GCC 6 68k soft-float
+	// conversion of the unsuffixed double literal produced +INF here, making
+	// every ambient sound effectively global.
+	FLOAT WorldSoundRadius() const {return 25.0f * ((INT)SoundRadius+1);}
 	FLOAT WorldVolumetricRadius() const {return 25.0 * ((int)VolumeRadius+1);}
 	inline UBOOL IsBlockedBy( const AActor* Other ) const;
 	inline UBOOL IsInZone( const AZoneInfo* Other ) const;

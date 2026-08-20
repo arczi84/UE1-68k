@@ -180,8 +180,9 @@ void RenderSubsurface
 	if( Pts[0]->Flags & Pts[1]->Flags & Pts[2]->Flags )
 		return;
 
-	// Backface reject it.
-	if( (PolyFlags & PF_TwoSided) && FTriple(Pts[0]->Point,Pts[1]->Point,Pts[2]->Point) <= 0.0 )
+	// Reject ordinary backfaces and reverse the winding only for genuinely
+	// two-sided mesh triangles.
+	if( FTriple(Pts[0]->Point,Pts[1]->Point,Pts[2]->Point) <= 0.0 )
 	{
 		if( !(PolyFlags & PF_TwoSided) )
 			return;

@@ -89,17 +89,23 @@ public:
 	{
 		return (2.0*R + 3.0*G + 1.0*B)/(6.0*256.0);
 	}
+	// These read the R/G/B fields directly rather than slicing the packed
+	// DWORD D. Going through D assumes the little-endian layout where D&0xff
+	// is R; on big-endian (68k) that byte is A and the channels come out
+	// swapped -- which showed up as blue-tinted 3D while the UI stayed
+	// correct. Field access is endian-independent and compiles to the same
+	// shifts on x86.
 	DWORD TrueColor() const
 	{
-		return ((D&0xff)<<16) + (D&0xff00) + ((D&0xff0000)>>16);
+		return ((DWORD)R << 16) | ((DWORD)G << 8) | (DWORD)B;
 	}
 	_WORD HiColor565() const
 	{
-		return ((D&0xf8) << 8) + ((D&0xfC00) >> 5) + ((D&0xf80000) >> 19);
+		return (_WORD)( ((R & 0xf8) << 8) | ((G & 0xfc) << 3) | ((B & 0xf8) >> 3) );
 	}
 	_WORD HiColor555() const
 	{
-		return ((D&0xf8) << 7) + ((D&0xf800) >> 6) + ((D&0xf80000) >> 19);
+		return (_WORD)( ((R & 0xf8) << 7) | ((G & 0xf8) << 2) | ((B & 0xf8) >> 3) );
 	}
 	FVector Plane() const
 	{

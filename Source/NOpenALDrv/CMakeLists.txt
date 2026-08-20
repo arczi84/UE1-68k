@@ -1,6 +1,9 @@
 project(NOpenALDrv C CXX)
 
 set(SRC_FILES "NOpenALDrv.cpp")
+if(AMIGA)
+  list(APPEND SRC_FILES "AmigaAudioCompat.c")
+endif()
 
 add_library(${PROJECT_NAME} ${LIB_TYPE} ${SRC_FILES})
 

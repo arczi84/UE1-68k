@@ -16,6 +16,10 @@
 #include "UnPath.h"		// Path building.
 #include "UnCon.h"		// Viewport console.
 
+// Unattended timedemo (UnGame.cpp): lets execClientMessage report the
+// TimeDemo HUD's completed-cycle broadcast.
+void AutoTimedemoNotifyMessage( const char* Msg );
+
 /*-----------------------------------------------------------------------------
 	The End.
 -----------------------------------------------------------------------------*/

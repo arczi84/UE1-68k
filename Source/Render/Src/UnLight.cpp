@@ -734,6 +734,20 @@ void FLightManager::Merge( FTextureInfo& Tex, BYTE Effect, INT Key, FLightInfo* 
 		// Scale and merge the lighting.
 		for( INT j=Info->MinU; j<Info->MaxU; j++ )
 		{
+			#if !__INTEL_BYTE_ORDER__
+			// The original packed DWORD addition assumes little endian: the unused
+			// alpha byte is most significant, so it cannot carry into B/G/R.  In
+			// big-endian FColor memory alpha is the least-significant byte of D;
+			// packed addition therefore leaks carries through the colour channels
+			// and leaves bright red/green/blue dashes in surface lightmaps.
+			FColor& Out = ((FColor*)Dest)[j];
+			const FColor& Base = ((const FColor*)Stream)[j];
+			const FColor& Add = Palette[NewSrc[j]];
+			Out.R = Min( (INT)Base.R + (INT)Add.R, 127 );
+			Out.G = Min( (INT)Base.G + (INT)Add.G, 127 );
+			Out.B = Min( (INT)Base.B + (INT)Add.B, 127 );
+			Out.A = 0;
+			#else
 			Dest[j] = Stream[j] + Palette[NewSrc[j]].D;
 			if( Dest[j] & 0x80808080 )
 			{
@@ -742,6 +756,7 @@ void FLightManager::Merge( FTextureInfo& Tex, BYTE Effect, INT Key, FLightInfo* 
 				SatMask -= (SatMask >>7);
 				Dest[j] = (Dest[j] & 0x7f7f7f7f) | SatMask;
 			}
+			#endif
 		}
 
 		Src    += Tex.UClamp;

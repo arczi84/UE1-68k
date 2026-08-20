@@ -63,6 +63,7 @@ CORE_API void appHandleSuspendResume( UBOOL bIsSuspending );
 -----------------------------------------------------------------------------*/
 
 CORE_API const char* ConfigFilename();
+CORE_API UBOOL SaveAllConfigs();
 CORE_API UBOOL GetConfigBool( const char* Section, const char* Key, UBOOL& Value, const char* FileName=NULL );
 CORE_API UBOOL GetConfigInt( const char* Section, const char* Key, INT& Value, const char* FileName=NULL );
 CORE_API UBOOL GetConfigFloat( const char* Section, const char* Key, FLOAT& Value, const char* FileName=NULL );
@@ -373,9 +374,36 @@ CORE_API DOUBLE appPow( DOUBLE A, DOUBLE B );
 CORE_API UBOOL appIsNan( DOUBLE Value );
 CORE_API INT appRand();
 CORE_API FLOAT appFrand();
+#if defined(__mc68000__) && defined(__HAVE_68881__)
+// floorf()/ceilf() are out-of-line libm calls here, which showed up as ~7.6%
+// of frame time in appRound plus another ~5.3% inside floorf itself.  A plain
+// C cast compiles straight to fintrz+fmove.l on the 68k FPU, so these stay in
+// registers and get inlined into the hot rasteriser loops.
+//
+// The cast truncates toward zero while floorf rounds toward -infinity, so the
+// negative cases are corrected explicitly to keep results bit-identical.
+inline INT appRound( FLOAT Value )
+{
+	// Matches floorf(Value + 0.5f): halfway cases up, negatives down.
+	const FLOAT Shifted = Value + 0.5f;
+	const INT Truncated = (INT)Shifted;
+	return ( Shifted < 0.0f && (FLOAT)Truncated != Shifted ) ? Truncated - 1 : Truncated;
+}
+inline INT appFloor( FLOAT Value )
+{
+	const INT Truncated = (INT)Value;
+	return ( Value < 0.0f && (FLOAT)Truncated != Value ) ? Truncated - 1 : Truncated;
+}
+inline INT appCeil( FLOAT Value )
+{
+	const INT Truncated = (INT)Value;
+	return ( Value > 0.0f && (FLOAT)Truncated != Value ) ? Truncated + 1 : Truncated;
+}
+#else
 CORE_API INT appRound( FLOAT Value );
 CORE_API INT appFloor( FLOAT Value );
 CORE_API INT appCeil( FLOAT Value );
+#endif
 
 /*-----------------------------------------------------------------------------
 	Memory functions.

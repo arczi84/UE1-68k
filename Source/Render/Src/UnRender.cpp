@@ -48,6 +48,11 @@ FBspSurf*   GSurfs;
 FVert*      GVerts;
 FVector*    GPoints;
 
+#ifdef PLATFORM_AMIGA
+extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+static INT GAmigaSkyPanTraceRemaining = 4;
+#endif
+
 /*-----------------------------------------------------------------------------
 	URender init & exit.
 -----------------------------------------------------------------------------*/
@@ -110,6 +115,7 @@ void URender::Init( UEngine* InEngine )
 	VectorMem.Init( 16384 );
 
 	// Init stats.
+	FpsOnly = 0;
 	STAT(appMemset(&GStat,0,sizeof(GStat));)
 
 	// Light manager.
@@ -154,18 +160,25 @@ void URender::DrawStats( FSceneNode* Frame )
 	DWORD RenderTime = ThisEndTime - ThisStartTime;
 	char TempStr[256];
 
-	if( FpsStats )
+	if( FpsStats || FpsOnly )
 	{
 		INT XL,YL;
-		appSprintf
-		(
-			TempStr,
-			"Frame=%05.1f MSEC Render=%05.1f MSEC Nodes=%03i Polys=%03i",
-			GSecondsPerCycle*1000 * FrameTime,
-			GSecondsPerCycle*1000 * RenderTime,
-			NodesDraw,
-			PolysDraw
-		);
+		const FLOAT FrameMsec = GSecondsPerCycle * 1000.f * FrameTime;
+		const FLOAT RenderMsec = GSecondsPerCycle * 1000.f * RenderTime;
+		const FLOAT FramesPerSecond = FrameMsec > 0.f ? 1000.f / FrameMsec : 0.f;
+		if( FpsOnly )
+			appSprintf( TempStr, "FPS=%05.1f", FramesPerSecond );
+		else
+			appSprintf
+			(
+				TempStr,
+				"FPS=%05.1f Frame=%05.1f MSEC Render=%05.1f MSEC Nodes=%03i Polys=%03i",
+				FramesPerSecond,
+				FrameMsec,
+				RenderMsec,
+				NodesDraw,
+				PolysDraw
+			);
 		Frame->Viewport->Canvas->StrLen( Frame->Viewport->Canvas->SmallFont, XL, YL, TempStr );
 		INT Y=Frame->Y;
 		Frame->Viewport->Canvas->Printf( Frame->Viewport->Canvas->SmallFont, (Frame->X-XL)/2, Y-YL-2, "%s", TempStr );
@@ -427,7 +440,14 @@ UBOOL URender::Exec(const char *Cmd,FOutputDevice *Out)
 	guard(URender::Exec);
 	const char* Str = Cmd;
 
-	if( ParseCommand(&Str,"STAT") )
+	if( ParseCommand(&Str,"FPS") )
+	{
+		FpsOnly ^= 1;
+		if( FpsOnly )
+			FpsStats = 0;
+		return 1;
+	}
+	else if( ParseCommand(&Str,"STAT") )
 	{
 		if( ParseCommand(&Str,"Fps"         ) ) FpsStats       ^= 1;
 		if( ParseCommand(&Str,"Global"      ) ) GlobalStats    ^= 1;
@@ -2043,13 +2063,28 @@ void URender::DrawFrame( FSceneNode* Frame )
 			FLOAT PanU = Surf->PanU;
 			if( Surf->PolyFlags & PF_AutoUPan )
 			{
-				PanU += ((INT)(Frame->Level->GetLevelInfo()->TimeSeconds * 35.f * Draw->Zone->TexUPanSpeed * 256.0)&0x3ffff)/256.0;
+				// Keep this expression entirely in FLOAT on 68k. The original
+				// unsuffixed 256.0 promotes it to DOUBLE before converting to
+				// INT; gcc/libnix's 68k conversion makes animated sky layers
+				// accelerate and eventually collapse into horizontal bands.
+				PanU += (FLOAT)(((INT)(Frame->Level->GetLevelInfo()->TimeSeconds * 35.f * Draw->Zone->TexUPanSpeed * 256.0f)) & 0x3ffff) * (1.0f/256.0f);
 			}
 			FLOAT PanV = Surf->PanV;
 			if( Surf->PolyFlags & PF_AutoVPan )
 			{
-				PanV += ((INT)(Frame->Level->GetLevelInfo()->TimeSeconds * 35.f * Draw->Zone->TexVPanSpeed * 256.0)&0x3ffff)/256.0;
+				PanV += (FLOAT)(((INT)(Frame->Level->GetLevelInfo()->TimeSeconds * 35.f * Draw->Zone->TexVPanSpeed * 256.0f)) & 0x3ffff) * (1.0f/256.0f);
 			}
+#ifdef PLATFORM_AMIGA
+			if( GAmigaSkyPanTraceRemaining > 0 && (Surf->PolyFlags & (PF_AutoUPan|PF_AutoVPan)) )
+			{
+				AmigaDebugLogf( "[Amiga] AUTOSKYPAN texture=%s time=%.3f speedU=%.3f speedV=%.3f panU=%.3f panV=%.3f flags=%08lx",
+					Surf->Texture ? Surf->Texture->GetName() : "None",
+					Frame->Level->GetLevelInfo()->TimeSeconds,
+					Draw->Zone->TexUPanSpeed, Draw->Zone->TexVPanSpeed,
+					PanU, PanV, (unsigned long)Surf->PolyFlags );
+				--GAmigaSkyPanTraceRemaining;
+			}
+#endif
 			if( Surf->PolyFlags & (PF_SmallWavy | PF_BigWavy) )
 			{
 				FLOAT T = Frame->Level->GetLevelInfo()->TimeSeconds;
@@ -2274,17 +2309,36 @@ void URender::DrawWorld( FSceneNode* Frame )
 	= Frame->Viewport->Actor->ViewTarget ? Cast<APawn>( Frame->Viewport->Actor->ViewTarget )
 	: Frame->Viewport->Actor->bBehindView ? NULL 
 	: Frame->Viewport->Actor;
+	AWeapon* ViewWeapon = NULL;
+	if( Actor )
+	{
+		// Engine.u carries the script-side property layout. On m68k the native
+		// APawn layout may place Weapon at a different offset after Team, so use
+		// the linked property offset used by the script VM.
+		UObjectProperty* WeaponProperty = ::FindField<UObjectProperty>( Actor->GetClass(), "Weapon" );
+		if( WeaponProperty )
+			ViewWeapon = *(AWeapon**)( (BYTE*)Actor + WeaponProperty->Offset );
+		else
+			ViewWeapon = Actor->Weapon;
+
+		// Pickup/switch processing may temporarily leave a stale reference.
+		if( ViewWeapon &&
+			( !ViewWeapon->IsValid() ||
+			  !ViewWeapon->IsA( AWeapon::StaticClass ) ||
+			  !ViewWeapon->FindFunction( ENGINE_InvCalcView ) ) )
+			ViewWeapon = NULL;
+	}
 	if
 	(	!GIsEditor
 	&&	Actor
-	&&	Actor->Weapon
+	&&	ViewWeapon
 	&&	(Frame->Viewport->Actor->ShowFlags & SHOW_Actors) )
 	{
-		Actor->Weapon->eventInvCalcView();
-		Actor->Weapon->bHidden = 0;
-		Actor->XLevel->SetActorZone( Actor->Weapon, 1, 0 );
-		GRender->DrawActor( Frame, Actor->Weapon );
-		Actor->Weapon->bHidden = 1;
+		ViewWeapon->eventInvCalcView();
+		ViewWeapon->bHidden = 0;
+		Actor->XLevel->SetActorZone( ViewWeapon, 1, 0 );
+		GRender->DrawActor( Frame, ViewWeapon );
+		ViewWeapon->bHidden = 1;
 	}
 
 	MemMark.Pop();

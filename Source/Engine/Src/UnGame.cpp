@@ -12,7 +12,49 @@
 
 #ifdef PLATFORM_AMIGA
 extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+extern "C" DWORD SDL_GetTicks( void );
+extern INT GAmigaActorProfileRequests;
 #endif
+
+// Unattended benchmark state.  Kept at file scope rather than in UGameEngine
+// because that class is CLASS_Config and its size is asserted against the
+// script-side class layout in Init().
+static UBOOL AutoTimedemoActive = 0;
+// Set once the completed-cycle result has been seen; Tick() then quits.  The
+// exit cannot happen inside the script call itself, which is still running.
+static UBOOL AutoTimedemoDone   = 0;
+static char  AutoTimedemoResult[256] = "";
+// Wall-clock accounting, kept separate from the HUD's figures.  The script
+// derives its numbers from Level.TimeSeconds, but the Amiga main loop clamps
+// the simulation step to 100 ms (see SDLLaunch.cpp) so that a disk or audio
+// stall cannot explode the physics.  Game time therefore runs slower than real
+// time whenever a frame takes longer than that, which silently inflates the
+// reported framerate and puts a hard floor of 10 FPS under the minimum.
+// These counters use appSeconds(), so stalls are reflected honestly.
+static INT    AutoTimedemoWallFrames = 0;
+static DOUBLE AutoTimedemoWallStart  = 0.0;
+static DOUBLE AutoTimedemoWallLast   = 0.0;
+static DOUBLE AutoTimedemoWorstFrame = 0.0;
+// Safety net: if the flyby never completes (broken path, stuck camera), give
+// up after this many seconds rather than running forever.
+static INT   AutoTimedemoTimeout = 300;
+static DOUBLE AutoTimedemoStart  = 0.0;
+
+//
+// Watch broadcast messages for the TimeDemo HUD's completed-cycle result.
+// Called from APlayerPawn::execClientMessage.
+//
+void AutoTimedemoNotifyMessage( const char* Msg )
+{
+	if( !AutoTimedemoActive || AutoTimedemoDone || !Msg )
+		return;
+	// TimeDemoIntroNullHud::FinishCycle builds "Result: <n> FPS (<n> frames, <n> seconds)".
+	if( appStrncmp( Msg, "Result:", 7 )!=0 )
+		return;
+	appStrncpy( AutoTimedemoResult, Msg, ARRAY_COUNT(AutoTimedemoResult) );
+	AutoTimedemoResult[ARRAY_COUNT(AutoTimedemoResult)-1] = 0;
+	AutoTimedemoDone = 1;
+}
 
 /*-----------------------------------------------------------------------------
 	Object class implementation.
@@ -156,6 +198,24 @@ void UGameEngine::Init()
 			SetProgress( Msg1, Msg2, 60.0 );
 		}
 	}
+	// Unattended benchmarking: [Engine.GameEngine] AutoTimedemo=1 in the ini
+	// runs the flyby immediately, writes the result to a file and quits, so a
+	// framerate can be measured without touching the console.
+	UBOOL AutoTimedemo = 0;
+	GetConfigBool( "Engine.GameEngine", "AutoTimedemo", AutoTimedemo );
+	if( AutoTimedemo && Client && Client->Viewports.Num() )
+	{
+		GetConfigInt( "Engine.GameEngine", "AutoTimedemoTimeout", AutoTimedemoTimeout );
+		if( AutoTimedemoTimeout <= 0 )
+			AutoTimedemoTimeout = 300;
+		debugf( NAME_Init, "AutoTimedemo: running one flyby cycle (timeout %i s)",
+			AutoTimedemoTimeout );
+		Exec( "TIMEDEMO", GSystem );
+		AutoTimedemoActive = 1;
+		AutoTimedemoDone   = 0;
+		AutoTimedemoStart  = 0.0;
+	}
+
 	debugf( NAME_Init, "Game engine initialized" );
 	unguard;
 }
@@ -210,7 +270,25 @@ UBOOL UGameEngine::Exec( const char* Cmd, FOutputDevice* Out )
 {
 	guard(UGameEngine::Exec);
 	const char *Str = Cmd;
-	if( ParseCommand( &Str, "OPEN" ) )
+	if( ParseCommand( &Str, "TIMEDEMO" ) )
+	{
+		char IntroMap[256] = "Unreal.unr";
+		GetConfigString( "URL", "LocalMap", IntroMap, ARRAY_COUNT(IntroMap) );
+		char Error256[256] = "";
+		if( !Browse( FURL(&LastURL,IntroMap,TRAVEL_Partial), Error256 ) )
+		{
+			if( Error256[0] )
+				Out->Logf( "Timedemo intro load failed: %s", Error256 );
+			return 1;
+		}
+
+		if( Client && Client->Viewports.Num() && Client->Viewports(0)->Actor )
+			Client->Viewports(0)->Actor->ScriptConsoleExec( "SUMMON TIMEDEMO.TIMEDEMO", Out );
+		else
+			Out->Log( "No active viewport for timedemo" );
+		return 1;
+	}
+	else if( ParseCommand( &Str, "OPEN" ) )
 	{
 		char Error256[256];
 		if( !Browse( FURL(&LastURL,Str,TRAVEL_Partial), Error256 ) && Error256[0] )
@@ -352,7 +430,7 @@ UBOOL UGameEngine::Browse( FURL URL, char* Error256 )
 		if( GLevel && GLevel->GetLevelInfo()->HubStackLevel>0 )
 		{
 			char Filename[256], SavedPortal[256];
-			appSprintf( Filename, "%s\\Game%i.usa", GSys->SavePath, GLevel->GetLevelInfo()->HubStackLevel-1 );
+			appSprintf( Filename, "%s" PATH_SEPARATOR "Game%i.usa", PATH(GSys->SavePath), GLevel->GetLevelInfo()->HubStackLevel-1 );
 			appStrcpy( SavedPortal, *URL.Portal );
 			URL = FURL( &URL, Filename, TRAVEL_Partial );
 			URL.Portal = SavedPortal;
@@ -372,8 +450,18 @@ UBOOL UGameEngine::Browse( FURL URL, char* Error256 )
 		// Handle restarting.
 		guard(LoadURL);
 		char Temp[256], Error256[256];
-		appSprintf( Temp, "%s\\Save%i.usa?load", GSys->SavePath, appAtoi(Option) );
+		appSprintf( Temp, "%s" PATH_SEPARATOR "Save%i.usa", PATH(GSys->SavePath), appAtoi(Option) );
+#ifdef PLATFORM_AMIGA
+		// FURL's text parser treats forward slashes as URL/portal separators.
+		// Passing "../Save/Save9.usa?load" through it therefore resets Map to
+		// the default Index.unr.  Build a local-file URL directly instead.
+		FURL SaveURL( Temp );
+		SaveURL.AddOption( "load" );
+		if( LoadMap(SaveURL,NULL,Error256) )
+#else
+		appStrcat( Temp, "?load" );
 		if( LoadMap(FURL(&LastURL,Temp,TRAVEL_Partial),NULL,Error256) )
+#endif
 		{
 			// Copy the hub stack.
 			INT i;
@@ -858,6 +946,39 @@ ULevel* UGameEngine::LoadMap( const FURL& URL, UPendingLevel* Pending, char* Err
 	}
 	unguard;
 
+#ifdef PLATFORM_AMIGA
+	// One-shot state dump for the currently invisible Brute family. This runs
+	// only at LoadMap completion, never in the frame/render loop.
+	for( INT AmigaActorIndex=0; AmigaActorIndex<GLevel->Num(); ++AmigaActorIndex )
+	{
+		AActor* AmigaActor = GLevel->Element(AmigaActorIndex);
+		if( !AmigaActor )
+			continue;
+		const char* AmigaClassName = AmigaActor->GetClass()->GetName();
+		if
+		(	appStricmp(AmigaClassName,"Brute")!=0
+		&&	appStricmp(AmigaClassName,"LesserBrute")!=0
+		&&	appStricmp(AmigaClassName,"Behemoth")!=0 )
+			continue;
+		UMesh* AmigaMesh = AmigaActor->Mesh;
+		debugf( NAME_Log,
+			"AMIGA_BRUTE actor=%s class=%s hidden=%d hiddenEd=%d highDetail=%d onlyOwner=%d drawType=%d style=%d mesh=%s skin=%s texture=%s anim=%s frame=%.4f scale=%.4f fatness=%d verts=%d tris=%d meshTextures=%d",
+			AmigaActor->GetName(), AmigaClassName,
+			(INT)AmigaActor->bHidden, (INT)AmigaActor->bHiddenEd,
+			(INT)AmigaActor->bHighDetail, (INT)AmigaActor->bOnlyOwnerSee,
+			(INT)AmigaActor->DrawType, (INT)AmigaActor->Style,
+			AmigaMesh ? AmigaMesh->GetName() : "None",
+			AmigaActor->Skin ? AmigaActor->Skin->GetName() : "None",
+			AmigaActor->Texture ? AmigaActor->Texture->GetName() : "None",
+			*AmigaActor->AnimSequence,
+			(DOUBLE)AmigaActor->AnimFrame, (DOUBLE)AmigaActor->DrawScale,
+			(INT)AmigaActor->Fatness,
+			AmigaMesh ? AmigaMesh->FrameVerts : 0,
+			AmigaMesh ? AmigaMesh->Tris.Num() : 0,
+			AmigaMesh ? AmigaMesh->Textures.Num() : 0 );
+	}
+#endif
+
 	// Init detail.
 	GLevel->DetailChange( Info->bHighDetailMode );
 
@@ -1046,6 +1167,13 @@ void UGameEngine::Tick( FLOAT DeltaSeconds )
 	guard(UGameEngine::Tick);
 	INT LocalTickCycles=0;
 	uclock(LocalTickCycles);
+#ifdef PLATFORM_AMIGA
+	const DWORD AmigaPerfTickStart = SDL_GetTicks();
+	DWORD AmigaPerfLevelStart = AmigaPerfTickStart;
+	DWORD AmigaPerfLevelEnd = AmigaPerfTickStart;
+	DWORD AmigaPerfClientStart = AmigaPerfTickStart;
+	DWORD AmigaPerfClientEnd = AmigaPerfTickStart;
+#endif
 
 	// If all viewports closed, time to exit.
 	if( Client && Client->Viewports.Num()==0 )
@@ -1053,6 +1181,91 @@ void UGameEngine::Tick( FLOAT DeltaSeconds )
 		debugf("All Windows Closed");
 		appRequestExit();
 		return;
+	}
+
+	// Unattended benchmark: quit once the TimeDemo HUD reports a completed
+	// flyby cycle.  Measuring a whole cycle rather than a fixed time window
+	// keeps runs comparable -- every run draws exactly the same frames along
+	// the same camera path, so a difference in the result is a difference in
+	// rendering speed and not in which part of the level got sampled.
+	if( AutoTimedemoActive )
+	{
+		const DOUBLE WallNow = appSeconds();
+		if( AutoTimedemoStart==0.0 )
+		{
+			AutoTimedemoStart = WallNow;
+			// Start counting from the second tick: the first carries level
+			// load time, not rendering.
+			AutoTimedemoWallStart = WallNow;
+			AutoTimedemoWallLast  = WallNow;
+		}
+		else
+		{
+			const DOUBLE FrameSecs = WallNow - AutoTimedemoWallLast;
+			AutoTimedemoWallLast = WallNow;
+			AutoTimedemoWallFrames++;
+			if( FrameSecs > AutoTimedemoWorstFrame )
+				AutoTimedemoWorstFrame = FrameSecs;
+		}
+
+		const UBOOL TimedOut =
+			(WallNow-AutoTimedemoStart) >= (DOUBLE)AutoTimedemoTimeout;
+
+		if( AutoTimedemoDone || TimedOut )
+		{
+			// One timestamped file per run, so successive benchmarks pile up
+			// instead of overwriting each other.
+			char ResultDir[192] = "PROGDIR:fps_logs";
+			GetConfigString( "Engine.GameEngine", "AutoTimedemoDir",
+				ResultDir, ARRAY_COUNT(ResultDir) );
+			appMkdir( ResultDir );		// harmless if it already exists
+
+			INT Year, Month, DayOfWeek, Day, Hour, Min, Sec, MSec;
+			appSystemTime( Year, Month, DayOfWeek, Day, Hour, Min, Sec, MSec );
+
+			char ResultFile[256];
+			appSprintf( ResultFile, "%s/fps_%04i%02i%02i_%02i%02i%02i.txt",
+				ResultDir, Year, Month, Day, Hour, Min, Sec );
+
+			const DOUBLE WallSecs = WallNow - AutoTimedemoWallStart;
+			const DOUBLE WallFps  = WallSecs > 0.0
+				? (DOUBLE)AutoTimedemoWallFrames / WallSecs : 0.0;
+			// Worst single frame expressed as a rate; unlike the HUD's
+			// "Minimum", this is not floored by the 100 ms simulation clamp.
+			const DOUBLE WorstFps = AutoTimedemoWorstFrame > 0.0
+				? 1.0 / AutoTimedemoWorstFrame : 0.0;
+
+			FILE* F = fopen( ResultFile, "w" );
+			if( F )
+			{
+				fprintf( F, "%04i-%02i-%02i %02i:%02i:%02i\n",
+					Year, Month, Day, Hour, Min, Sec );
+				if( AutoTimedemoDone )
+					fprintf( F, "%s\n", AutoTimedemoResult );
+				else
+					fprintf( F, "TIMEOUT after %d seconds - flyby never completed\n",
+						AutoTimedemoTimeout );
+				// Wall-clock figures; see the note on AutoTimedemoWallFrames.
+				// These differ from the line above whenever frames overran the
+				// 100 ms simulation clamp.
+				fprintf( F, "Wall: %.2f FPS (%d frames, %.2f seconds)\n",
+					(FLOAT)WallFps, AutoTimedemoWallFrames, (FLOAT)WallSecs );
+				fprintf( F, "Worst frame: %.0f ms (%.2f FPS)\n",
+					(FLOAT)(AutoTimedemoWorstFrame*1000.0), (FLOAT)WorstFps );
+				fclose( F );
+			}
+			else
+			{
+				debugf( "AutoTimedemo: could not write %s", ResultFile );
+			}
+			if( AutoTimedemoDone )
+				debugf( "AutoTimedemo: %s -> %s", AutoTimedemoResult, ResultFile );
+			else
+				debugf( "AutoTimedemo: timed out after %i seconds", AutoTimedemoTimeout );
+			AutoTimedemoActive = 0;
+			appRequestExit();
+			return;
+		}
 	}
 
 	// If game is paused, release the cursor.
@@ -1076,10 +1289,16 @@ void UGameEngine::Tick( FLOAT DeltaSeconds )
 	guard(TickLevel);
 	GameCycles=0;
 	uclock(GameCycles);
+#ifdef PLATFORM_AMIGA
+	AmigaPerfLevelStart = SDL_GetTicks();
+#endif
 	if( GLevel )
 		GLevel->Tick( LEVELTICK_All, DeltaSeconds );
 	if( Client && Client->Viewports.Num() && Client->Viewports(0)->Actor->XLevel!=GLevel )
 		Client->Viewports(0)->Actor->XLevel->Tick( LEVELTICK_All, DeltaSeconds );
+#ifdef PLATFORM_AMIGA
+	AmigaPerfLevelEnd = SDL_GetTicks();
+#endif
 	uunclock(GameCycles);
 	unguard;
 
@@ -1180,14 +1399,52 @@ void UGameEngine::Tick( FLOAT DeltaSeconds )
 	// Render everything.
 	guard(ClientTick);
 	INT LocalClientCycles=0;
+#ifdef PLATFORM_AMIGA
+	AmigaPerfClientStart = SDL_GetTicks();
+	AmigaPerfClientEnd = AmigaPerfClientStart;
+#endif
 	if( Client )
 	{
 		uclock(LocalClientCycles);
 		Client->Tick();
 		uunclock(LocalClientCycles);
+#ifdef PLATFORM_AMIGA
+		AmigaPerfClientEnd = SDL_GetTicks();
+#endif
 	}
 	ClientCycles=LocalClientCycles;
 	unguard;
+
+#ifdef PLATFORM_AMIGA
+	// Stay completely passive during startup. Once the map has warmed up,
+	// request exactly one per-class actor profile after a genuinely slow
+	// simulation frame. The following frame is measured automatically, so
+	// the user never has to restart merely to enable diagnostics.
+	static ULevel* AmigaPerfLevel = NULL;
+	static INT AmigaPerfWarmupFrames = 0;
+	static INT AmigaPerfCooldownFrames = 0;
+	if( GLevel != AmigaPerfLevel )
+	{
+		AmigaPerfLevel = GLevel;
+		AmigaPerfWarmupFrames = 100;
+		AmigaPerfCooldownFrames = 0;
+	}
+	const DWORD AmigaPerfEnd = SDL_GetTicks();
+	const DWORD AmigaPerfLevelMs = AmigaPerfLevelEnd-AmigaPerfLevelStart;
+	const DWORD AmigaPerfTotalMs = AmigaPerfEnd-AmigaPerfTickStart;
+	if( AmigaPerfWarmupFrames > 0 )
+		--AmigaPerfWarmupFrames;
+	else if( AmigaPerfCooldownFrames > 0 )
+		--AmigaPerfCooldownFrames;
+	else if( GLevel && AmigaPerfLevelMs >= 150 && GAmigaActorProfileRequests==0 )
+	{
+		AmigaDebugLogf( "[Amiga] AUTOPERF trigger map=%s actors=%d level=%lu total=%lu ms",
+			GLevel->GetName(), GLevel->Num(),
+			(unsigned long)AmigaPerfLevelMs, (unsigned long)AmigaPerfTotalMs );
+		GAmigaActorProfileRequests = 1;
+		AmigaPerfCooldownFrames = 100;
+	}
+#endif
 
 	uunclock(LocalTickCycles);
 	TickCycles=LocalTickCycles;

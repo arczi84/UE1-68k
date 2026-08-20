@@ -6,6 +6,9 @@
 
 #ifdef PLATFORM_AMIGA
 extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+extern "C" int AmigaRawMouseSetCapture( int Enabled );
+extern "C" int AmigaRawMouseRead( int* DX, int* DY, unsigned int* Pressed,
+	unsigned int* Released, unsigned int* Held );
 #define AMIGA_VIEW_LOG(...) AmigaDebugLogf( "[Amiga] Viewport: " __VA_ARGS__ )
 #else
 #define AMIGA_VIEW_LOG(...)
@@ -198,9 +201,6 @@ UNSDLViewport::UNSDLViewport( ULevel* InLevel, UNSDLClient* InClient )
 
 	Destroyed = false;
 	QuitRequested = false;
-#ifdef PLATFORM_AMIGA
-	IgnoreNextWarp = false;
-#endif
 
 	unguard;
 }
@@ -254,12 +254,14 @@ void UNSDLViewport::UpdateWindow()
 	}
 
 	// Set window title.
+#ifndef PLATFORM_AMIGA
 	if( SizeX && SizeY )
 	{
 		appSprintf(WindowName+strlen(WindowName)," (%i x %i)",SizeX,SizeY);
 		if( this == Client->CurrentViewport() )
 			strcat( WindowName, " *" );
 	}
+#endif
 	SDL_SetWindowTitle( hWnd, WindowName );
 
 	unguard;
@@ -286,6 +288,11 @@ void UNSDLViewport::OpenWindow( void* InParentWindow, UBOOL Temporary, INT NewX,
 		char Temp[256] = "";
 		GetConfigString( "Engine.Engine", "GameRenderDevice", Temp, ARRAY_COUNT(Temp) );
 		appStrupr( Temp );
+#ifdef PLATFORM_AMIGA
+		// The Amiga build has one runtime-selectable renderer setting for both
+		// windowed and fullscreen modes.
+		DoOpenGL = appStrstr( Temp, "OPENGL" ) != NULL;
+#else
 		if( !appStrstr( Temp, "OPENGL" ) )
 		{
 			GetConfigString( "Engine.Engine", "WindowedRenderDevice", Temp, ARRAY_COUNT(Temp) );
@@ -297,6 +304,7 @@ void UNSDLViewport::OpenWindow( void* InParentWindow, UBOOL Temporary, INT NewX,
 		{
 			DoOpenGL = 1;
 		}
+#endif
 		if( DoOpenGL && appStrstr( Temp, "GLES" ) )
 			GLProfile = SDL_GL_CONTEXT_PROFILE_ES;
 	}
@@ -337,7 +345,7 @@ void UNSDLViewport::OpenWindow( void* InParentWindow, UBOOL Temporary, INT NewX,
 		// Set OpenGL attributes if needed.
 		if( DoOpenGL )
 		{
-#ifdef PLATFORM_AMIGA
+#ifdef PLATFORM_SDL12_COMPAT
 			// Amiga SDL 1.2 creates the implicit GL context in
 			// SDL_SetVideoMode.  Give AmigaMesa a complete, conservative
 			// framebuffer request before that call.
@@ -434,8 +442,15 @@ void UNSDLViewport::OpenWindow( void* InParentWindow, UBOOL Temporary, INT NewX,
 					appErrorf( "Could not create SDL renderer: %s", SDL_GetError() );
 				}
 			}
-			// Create framebuffer texture.
-			SDLTexFormat = SDL_PIXELFORMAT_ARGB8888;
+			// Match SoftDrv's staging texture to the selected SDL 1.2 video
+			// surface. In RGB565 this halves both framebuffer size and blit
+			// traffic, and gives SoftDrv the CC_RGB565 capability it expects.
+			{
+				SDL_DisplayMode DeskMode;
+				SDLTexFormat = ( SDL_GetDesktopDisplayMode( DisplayIndex, &DeskMode ) == 0 && DeskMode.format )
+					? DeskMode.format
+					: SDL_PIXELFORMAT_RGB565;
+			}
 			ColorBytes = SDL_BYTESPERPIXEL( SDLTexFormat );
 			Caps = ( SDL_PIXELLAYOUT( SDLTexFormat ) == SDL_PACKEDLAYOUT_565 ) ? CC_RGB565 : 0;
 			SDLTex = SDL_CreateTexture( SDLRen, SDLTexFormat, SDL_TEXTUREACCESS_STREAMING, NewX, NewY );
@@ -480,6 +495,14 @@ void UNSDLViewport::OpenWindow( void* InParentWindow, UBOOL Temporary, INT NewX,
 		Repaint();
 		AMIGA_VIEW_LOG( "after first Repaint" );
 	}
+
+#ifdef PLATFORM_AMIGA
+	// Complete startup capture for windowed mode too. The early SDL grab hides
+	// the pointer; this call also installs the raw input.device handler used for
+	// unlimited relative mouse movement.
+	if( !Temporary && !GIsEditor && Client->CaptureMouse )
+		SetMouseCapture( 1, 1, 0 );
+#endif
 
 	unguard;
 }
@@ -682,18 +705,33 @@ void UNSDLViewport::MakeFullscreen( INT NewX, INT NewY, UBOOL UpdateProfile )
 {
 	guard(UNSDLViewport::MakeFullscreen);
 
-	// If someone else is fullscreen, stop them.
-	if( Client->FullscreenViewport )
+	// If another viewport is fullscreen, stop it.  When this viewport merely
+	// changes fullscreen resolution, keep it fullscreen: leaving first would
+	// restore SavedX/SavedY and make the next toggle jump back to the size used
+	// at game startup.
+	if( Client->FullscreenViewport && Client->FullscreenViewport != this )
 		Client->EndFullscreen();
 
-	// Save this window.
-	SavedX = SizeX;
-	SavedY = SizeY;
+	const UBOOL WasFullscreen = Client->FullscreenViewport == this;
+	if( !WasFullscreen )
+	{
+		// Save the current (not startup) window size for leaving fullscreen.
+		SavedX = SizeX;
+		SavedY = SizeY;
+	}
 
 	// Fullscreen rendering. For now no borderless.
-	Client->FullscreenViewport = this;
 	SetClientSize( NewX, NewY, false );
-	SDL_SetWindowFullscreen( hWnd, SDL_WINDOW_FULLSCREEN );
+	const INT FullscreenResult = SDL_SetWindowFullscreen( hWnd, SDL_WINDOW_FULLSCREEN );
+	AMIGA_VIEW_LOG( "SDL_SetWindowFullscreen result=%d error='%s'",
+		FullscreenResult, SDL_GetError() );
+	if( FullscreenResult < 0 )
+	{
+		if( WasFullscreen )
+			Client->FullscreenViewport = NULL;
+		return;
+	}
+	Client->FullscreenViewport = this;
 
 	if( UpdateProfile )
 	{
@@ -753,14 +791,22 @@ void UNSDLViewport::SetMouseCapture( UBOOL Capture, UBOOL Clip, UBOOL OnlyFocus 
 	// Handle capturing.
 	SDL_SetRelativeMouseMode( (SDL_bool)Capture );
 #ifdef PLATFORM_AMIGA
-	// Center the cursor now so the first captured motion delta is measured from
-	// the middle, and clear any pending warp-skip left over from a prior grab.
-	IgnoreNextWarp = false;
-	if( Capture && SizeX && SizeY )
+	// UE1 releases relative mode while paused or in a menu.  The SDL 1.2
+	// compatibility call also shows and ungrabs the Workbench pointer, which
+	// leaves it visible over the menu and lets clicks escape the game window.
+	// Keep the OS pointer hidden and confined while our window still owns the
+	// keyboard focus; raw relative input itself remains disabled below.
+	if( !Capture && hWnd && SDL_GetKeyboardFocus() == hWnd )
 	{
-		IgnoreNextWarp = true;
-		SDL_WarpMouse( SizeX / 2, SizeY / 2 );
+		SDL_WM_GrabInput( SDL_GRAB_ON );
+		SDL_ShowCursor( SDL_DISABLE );
 	}
+	// SDL's amiga_WarpWMCursor() is empty in this SDL 1.2 build. Keep SDL's
+	// grab/cursor handling, but obtain unlimited relative deltas directly from
+	// one input.device stream handler.
+	AmigaRawMouseSetCapture( Capture ? 1 : 0 );
+	if( Capture && SizeX > 0 && SizeY > 0 )
+		SDL_WarpMouse( SizeX / 2, SizeY / 2 );
 #endif
 
 	unguard;
@@ -788,15 +834,48 @@ UBOOL UNSDLViewport::TickInput()
 	const FLOAT CurTime = appSeconds();
 	const FLOAT DeltaTime = CurTime - InputUpdateTime;
 
+#ifdef PLATFORM_AMIGA
+	INT CapturedMouseDX = 0;
+	INT CapturedMouseDY = 0;
+	// Releasing SDL 1.2's input grab after Escape can enqueue a spurious
+	// SDL_QUIT on the Amiga windowed backend. Remember the real Escape briefly
+	// so that one synthetic quit does not destroy the only viewport.
+	static Uint32 IgnoreQuitAfterEscapeUntil = 0;
+	// Capture is enabled explicitly by clicking the game window. Release it in
+	// UE1 menus or when the SDL window loses input focus.
+	const UBOOL bIsInUI = Console &&
+		((UObject*)Console)->GetMainFrame() &&
+		((UObject*)Console)->GetMainFrame()->StateNode &&
+		((UObject*)Console)->GetMainFrame()->StateNode->GetFName() == "Menuing";
+	const UBOOL bHasInputFocus = hWnd && SDL_GetKeyboardFocus() == hWnd;
+	if( SDL_GetRelativeMouseMode() && (GIsEditor || bIsInUI || !bHasInputFocus) )
+		SetMouseCapture( 0, 0, 0 );
+	else if( SDL_GetRelativeMouseMode() == SDL_FALSE && !GIsEditor &&
+		!bIsInUI && bHasInputFocus && Client->CaptureMouse )
+	{
+		// Loading a save closes the menu but does not generate a mouse click.
+		// Restore gameplay capture as soon as the viewport becomes active again.
+		SetMouseCapture( 1, 1, 0 );
+	}
+#endif
+
 	while( SDL_PollEvent( &Ev ) )
 	{
 		switch( Ev.type )
 		{
 			case SDL_QUIT:
+#ifdef PLATFORM_AMIGA
+				if( IgnoreQuitAfterEscapeUntil &&
+					(INT)(IgnoreQuitAfterEscapeUntil - SDL_GetTicks()) >= 0 )
+				{
+					IgnoreQuitAfterEscapeUntil = 0;
+					break;
+				}
+#endif
 				// signal to client and remember set a flag just in case
 				QuitRequested = true;
 				return true;
-#ifndef PLATFORM_AMIGA
+#ifndef PLATFORM_SDL12_COMPAT
 			case SDL_TEXTINPUT:
 				for( const char *p = Ev.text.text; *p && p < Ev.text.text + sizeof( Ev.text.text ); ++p )
 				{
@@ -808,23 +887,33 @@ UBOOL UNSDLViewport::TickInput()
 				break;
 #endif
 			case SDL_KEYDOWN:
+#ifdef PLATFORM_AMIGA
+				if( Ev.key.keysym.sym == SDLK_ESCAPE )
+					IgnoreQuitAfterEscapeUntil = SDL_GetTicks() + 500;
+#endif
 				if( Ev.key.keysym.sym == SDLK_RETURN && (Ev.key.keysym.mod & KMOD_ALT) )
 				{
 					Exec("ToggleFullscreen", this);
 					break;
 				}
-#ifdef PLATFORM_AMIGA
+#ifdef PLATFORM_SDL12_COMPAT
 				// SDL 1.2 has no SDL_TEXTINPUT; deliver printable characters
 				// from the key event's unicode field instead.
-				if( Ev.type == SDL_KEYDOWN && Ev.key.keysym.unicode )
+				if( Ev.type == SDL_KEYDOWN )
 				{
 					Uint16 U = Ev.key.keysym.unicode;
+					// Some Amiga SDL keyboard drivers leave unicode at zero
+					// even when translation is enabled. SDLKey values for the
+					// printable US-ASCII range and Return are ASCII-compatible.
+					if( !U && ((Ev.key.keysym.sym >= 32 && Ev.key.keysym.sym < 127)
+						|| Ev.key.keysym.sym == SDLK_RETURN) )
+						U = (Uint16)Ev.key.keysym.sym;
 					if( U < 128 && ( isprint( U ) || U == '\r' ) )
 						Client->Engine->Key( this, (EInputKey)U );
 				}
 #endif
 			case SDL_KEYUP:
-#ifdef PLATFORM_AMIGA
+#ifdef PLATFORM_SDL12_COMPAT
 				// SDL 1.2's scancode is the platform-specific raw key code, while
 				// InitKeyMap() above is deliberately indexed by SDLKey/SDLK_*.
 				// Using scancode made Escape and most gameplay keys become unrelated
@@ -836,9 +925,58 @@ UBOOL UNSDLViewport::TickInput()
 				break;
 			case SDL_MOUSEBUTTONDOWN:
 			case SDL_MOUSEBUTTONUP:
+#ifdef PLATFORM_AMIGA
+				// SDL 1.2 has no reliable window-relative mode until input is
+				// grabbed. A click inside the gameplay viewport is the explicit
+				// request to capture and hide the pointer.
+				if( Ev.type == SDL_MOUSEBUTTONDOWN && !GIsEditor && !bIsInUI &&
+					SDL_GetRelativeMouseMode() == SDL_FALSE )
+					SetMouseCapture( 1, 1, 0 );
+#endif
 				CauseInputEvent( MouseButtonMap[Ev.button.button], ( Ev.type == SDL_MOUSEBUTTONDOWN ) ? IST_Press : IST_Release );
 				break;
-#ifndef PLATFORM_AMIGA
+#ifdef PLATFORM_SDL12_COMPAT
+			case SDL_CONTROLLERBUTTONDOWN:
+			case SDL_CONTROLLERBUTTONUP:
+				if( Ev.cbutton.button < SDL_CONTROLLER_BUTTON_MAX )
+				{
+					const UBOOL bIsInUI = Console &&
+						((UObject*)Console)->GetMainFrame() &&
+						((UObject*)Console)->GetMainFrame()->StateNode &&
+						((UObject*)Console)->GetMainFrame()->StateNode->GetFName() == "Menuing";
+					const BYTE* JoyMap = bIsInUI ? JoyButtonMapUI : JoyButtonMap;
+					CauseInputEvent( JoyMap[Ev.cbutton.button], ( Ev.type == SDL_CONTROLLERBUTTONDOWN ) ? IST_Press : IST_Release );
+				}
+				break;
+			case SDL_CONTROLLERAXISMOTION:
+				if( Ev.caxis.axis < SDL_CONTROLLER_AXIS_MAX )
+				{
+					const BYTE Key = JoyAxisMap[Ev.caxis.axis];
+					const INT PrevValue = JoyAxis[Ev.caxis.axis];
+					INT NewValue = Clamp( (INT)Ev.caxis.value, -256, 256 );
+					INT DeadZone = 0;
+					if( Key < IK_JoyX )
+					{
+						const INT PressThreshold = 64;
+						if( PrevValue < PressThreshold && NewValue >= PressThreshold )
+							CauseInputEvent( Key, IST_Press );
+						else if( PrevValue >= PressThreshold && NewValue < PressThreshold )
+							CauseInputEvent( Key, IST_Release );
+					}
+					else
+					{
+						if( Key >= IK_JoyX && Key <= IK_JoyZ )
+							DeadZone = Client->DeadZoneXYZ * 256.f;
+						else if( Key == IK_JoyR || Key == IK_JoyU || Key == IK_JoyV )
+							DeadZone = Client->DeadZoneRUV * 256.f;
+						if( Abs(NewValue) < DeadZone )
+							NewValue = 0;
+					}
+					JoyAxis[Ev.caxis.axis] = NewValue;
+				}
+				break;
+#endif
+#ifndef PLATFORM_SDL12_COMPAT
 			case SDL_MOUSEWHEEL:
 				if( Ev.wheel.y )
 				{
@@ -894,8 +1032,18 @@ UBOOL UNSDLViewport::TickInput()
 					JoyAxis[Ev.caxis.axis] = NewValue;
 				}
 				break;
-#endif // !PLATFORM_AMIGA (SDL 1.2 has no wheel/gamecontroller events)
+#endif // !PLATFORM_SDL12_COMPAT (SDL 1.2 has no wheel/gamecontroller events)
 			case SDL_MOUSEMOTION:
+#ifdef PLATFORM_AMIGA
+				if( SDL_GetRelativeMouseMode() )
+				{
+					// Keep SDL deltas as a fallback in case input.device could
+					// not be installed on this particular system.
+					CapturedMouseDX += Ev.motion.xrel;
+					CapturedMouseDY += Ev.motion.yrel;
+					break;
+				}
+#endif
 				if( !Client->FullscreenViewport && !SDL_GetRelativeMouseMode() )
 				{
 					// If cursor isn't captured, just do MousePosition.
@@ -903,46 +1051,62 @@ UBOOL UNSDLViewport::TickInput()
 				}
 				else
 				{
-#ifdef PLATFORM_AMIGA
-					// Drop the synthetic motion produced by our own recenter warp,
-					// otherwise it would cancel out the player's turn.
-					if( IgnoreNextWarp )
-					{
-						IgnoreNextWarp = false;
-						break;
-					}
-#endif
+					INT MouseDX = Ev.motion.xrel;
+					INT MouseDY = -Ev.motion.yrel;
 					DWORD ViewportButtonFlags = 0;
 					if( Ev.motion.state & SDL_BUTTON_LMASK ) ViewportButtonFlags |= MOUSE_Left;
 					if( Ev.motion.state & SDL_BUTTON_RMASK ) ViewportButtonFlags |= MOUSE_Right;
 					if( Ev.motion.state & SDL_BUTTON_MMASK ) ViewportButtonFlags |= MOUSE_Middle;
-					if( Ev.motion.xrel || Ev.motion.yrel )
+					if( MouseDX || MouseDY )
 					{
-						Client->Engine->MouseDelta( this, ViewportButtonFlags, Ev.motion.xrel, -Ev.motion.yrel );
-						if( Ev.motion.xrel ) CauseInputEvent( IK_MouseX, IST_Axis, Ev.motion.xrel );
-						if( Ev.motion.yrel ) CauseInputEvent( IK_MouseY, IST_Axis, -Ev.motion.yrel );
+						Client->Engine->MouseDelta( this, ViewportButtonFlags, MouseDX, MouseDY );
+						if( MouseDX ) CauseInputEvent( IK_MouseX, IST_Axis, MouseDX );
+						if( MouseDY ) CauseInputEvent( IK_MouseY, IST_Axis, MouseDY );
 					}
-#ifdef PLATFORM_AMIGA
-					// SDL 1.2's grabbed cursor stops at the window edge, so the raw
-					// deltas cap out. Warp the cursor back to the center after every
-					// motion so there is always room to keep turning.
-					if( SizeX && SizeY )
-					{
-						const INT CenterX = SizeX / 2;
-						const INT CenterY = SizeY / 2;
-						if( Ev.motion.x != CenterX || Ev.motion.y != CenterY )
-						{
-							IgnoreNextWarp = true;
-							SDL_WarpMouse( CenterX, CenterY );
-						}
-					}
-#endif
 				}
 				break;
 			default:
 				break;
 		}
 	}
+
+#ifdef PLATFORM_AMIGA
+	// input.device supplies physical relative deltas even after Intuition's
+	// pointer has reached a window or screen edge; no cursor warp is needed.
+	if( SDL_GetRelativeMouseMode() )
+	{
+		INT RawMouseDX = 0;
+		INT RawMouseDY = 0;
+		unsigned int RawPressed = 0;
+		unsigned int RawReleased = 0;
+		unsigned int RawHeld = 0;
+		const UBOOL HaveRawInput = AmigaRawMouseRead(
+			&RawMouseDX, &RawMouseDY, &RawPressed, &RawReleased, &RawHeld );
+		if( !HaveRawInput )
+		{
+			RawMouseDX = CapturedMouseDX;
+			RawMouseDY = CapturedMouseDY;
+		}
+		if( RawPressed & (1U << 0) ) CauseInputEvent( IK_LeftMouse,   IST_Press );
+		if( RawPressed & (1U << 1) ) CauseInputEvent( IK_MiddleMouse, IST_Press );
+		if( RawPressed & (1U << 2) ) CauseInputEvent( IK_RightMouse,  IST_Press );
+		if( RawReleased & (1U << 0) ) CauseInputEvent( IK_LeftMouse,   IST_Release );
+		if( RawReleased & (1U << 1) ) CauseInputEvent( IK_MiddleMouse, IST_Release );
+		if( RawReleased & (1U << 2) ) CauseInputEvent( IK_RightMouse,  IST_Release );
+		if( RawMouseDX || RawMouseDY )
+		{
+			DWORD ViewportButtonFlags = 0;
+			if( RawHeld & (1U << 0) ) ViewportButtonFlags |= MOUSE_Left;
+			if( RawHeld & (1U << 2) ) ViewportButtonFlags |= MOUSE_Right;
+			if( RawHeld & (1U << 1) ) ViewportButtonFlags |= MOUSE_Middle;
+			RawMouseDY = -RawMouseDY;
+			Client->Engine->MouseDelta( this, ViewportButtonFlags, RawMouseDX, RawMouseDY );
+			if( RawMouseDX ) CauseInputEvent( IK_MouseX, IST_Axis, RawMouseDX );
+			if( RawMouseDY ) CauseInputEvent( IK_MouseY, IST_Axis, RawMouseDY );
+			SDL_WarpMouse( SizeX / 2, SizeY / 2 );
+		}
+	}
+#endif
 
 	// Constantly hammer the input system with axis events for axes that are not zero.
 	for ( INT i = 0; i < SDL_CONTROLLER_AXIS_MAX; ++i )
@@ -951,7 +1115,11 @@ UBOOL UNSDLViewport::TickInput()
 		const SWORD Value = JoyAxis[i];
 		if ( Value && Key && Key >= IK_JoyX )
 		{
+#ifdef PLATFORM_SDL12_COMPAT
+			const FLOAT FltValue = Clamp( Value / 256.f, -1.f, 1.f );
+#else
 			const FLOAT FltValue = Clamp( Value / 32767.f, -1.f, 1.f );
+#endif
 			FLOAT Scale = ( Key >= IK_JoyX && Key <= IK_JoyZ ) ? Client->ScaleXYZ : Client->ScaleRUV;
 			Scale *= JoyAxisDefaultScale[i] * DeltaTime;
 			if ( ( Client->InvertV && Key == IK_JoyV ) || ( Client->InvertY && Key == IK_JoyY ) )
@@ -974,7 +1142,88 @@ UBOOL UNSDLViewport::TickInput()
 UBOOL UNSDLViewport::Exec( const char* Cmd, FOutputDevice* Out )
 {
 	guard(UNSDLViewport::Exec);
-	if( UViewport::Exec( Cmd, Out ) )
+	const char* RenderCmd = Cmd;
+	if( ParseCommand( &RenderCmd, "GetRenderDevice" ) )
+	{
+		char RenderClass[256] = "";
+		GetConfigString( "Engine.Engine", "GameRenderDevice",
+			RenderClass, ARRAY_COUNT(RenderClass) );
+		Out->Log( RenderClass );
+		return 1;
+	}
+	else if( ParseCommand( &RenderCmd, "SetRenderDevice" ) )
+	{
+		const char* RenderClass =
+			ParseCommand( &RenderCmd, "Software" )
+			? "SoftDrv.SoftwareRenderDevice"
+			: "NOpenGLDrv.NOpenGLRenderDevice";
+		// Write the exact INI keys directly. The generic UnrealScript SET
+		// command only handles reflected class properties and silently ignored
+		// the legacy WindowedRenderDevice/RenderDevice keys.
+		SetConfigString( "Engine.Engine", "GameRenderDevice", RenderClass );
+		SetConfigString( "Engine.Engine", "WindowedRenderDevice", RenderClass );
+		SetConfigString( "Engine.Engine", "RenderDevice", RenderClass );
+		Out->Log( RenderClass );
+		return 1;
+	}
+	else if( ParseCommand( &RenderCmd, "GetTextureFiltering" ) )
+	{
+		char RenderClass[256] = "";
+		GetConfigString( "Engine.Engine", "GameRenderDevice",
+			RenderClass, ARRAY_COUNT(RenderClass) );
+		INT Enabled = 1;
+		if( appStrstr( appStrupr(RenderClass), "SOFTDRV" ) )
+		{
+			GetConfigInt( "SoftDrv.SoftwareRenderDevice",
+				"HighResTextureSmooth", Enabled );
+		}
+		else
+		{
+			INT NoFiltering = 0;
+			GetConfigInt( "NOpenGLDrv.NOpenGLRenderDevice",
+				"NoFiltering", NoFiltering );
+			Enabled = !NoFiltering;
+		}
+		Out->Log( Enabled ? "True" : "False" );
+		return 1;
+	}
+	else if( ParseCommand( &RenderCmd, "SetTextureFiltering" ) )
+	{
+		const UBOOL Enabled = ParseCommand( &RenderCmd, "On" );
+		char RenderClass[256] = "";
+		GetConfigString( "Engine.Engine", "GameRenderDevice",
+			RenderClass, ARRAY_COUNT(RenderClass) );
+		if( appStrstr( appStrupr(RenderClass), "SOFTDRV" ) )
+		{
+			const char* Value = Enabled ? "True" : "False";
+			SetConfigString( "SoftDrv.SoftwareRenderDevice",
+				"HighResTextureSmooth", Value );
+			SetConfigString( "SoftDrv.SoftwareRenderDevice",
+				"LowResTextureSmooth", Value );
+			char SetCommand[128];
+			appSprintf( SetCommand,
+				"set SoftDrv.SoftwareRenderDevice HighResTextureSmooth %s", Value );
+			GObj.Exec( SetCommand, Out );
+			appSprintf( SetCommand,
+				"set SoftDrv.SoftwareRenderDevice LowResTextureSmooth %s", Value );
+			GObj.Exec( SetCommand, Out );
+		}
+		else
+		{
+			const char* Value = Enabled ? "False" : "True";
+			SetConfigString( "NOpenGLDrv.NOpenGLRenderDevice",
+				"NoFiltering", Value );
+			char SetCommand[128];
+			appSprintf( SetCommand,
+				"set NOpenGLDrv.NOpenGLRenderDevice NoFiltering %s", Value );
+			GObj.Exec( SetCommand, Out );
+		}
+		if( RenDev )
+			RenDev->Flush();
+		Out->Log( Enabled ? "True" : "False" );
+		return 1;
+	}
+	else if( UViewport::Exec( Cmd, Out ) )
 	{
 		return 1;
 	}
@@ -984,7 +1233,12 @@ UBOOL UNSDLViewport::Exec( const char* Cmd, FOutputDevice* Out )
 		if( Client->FullscreenViewport )
 			Client->EndFullscreen();
 		else if( !(Actor->ShowFlags & SHOW_ChildWindow) )
-			Client->TryRenderDevice( this, "ini:Engine.Engine.GameRenderDevice", 1 );
+		{
+			// SDL uses the same render device in a window and fullscreen.
+			// Recreating it here can reset the viewport to its startup size;
+			// enter fullscreen directly using the resolution currently shown.
+			MakeFullscreen( SizeX, SizeY, 1 );
+		}
 		return 1;
 	}
 	else if( ParseCommand(&Cmd, "GetCurrentRes") )

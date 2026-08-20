@@ -353,6 +353,8 @@ CORE_API FLOAT appFrand()
 {
 	return rand() / (FLOAT)RAND_MAX;
 }
+#if !(defined(__mc68000__) && defined(__HAVE_68881__))
+// On 68k with an FPU these are inlined in UnFile.h; see the comment there.
 CORE_API INT appFloor( FLOAT Value )
 {
 	return (INT)floorf(Value);
@@ -365,6 +367,7 @@ CORE_API INT appRound( FLOAT Value )
 {
 	return (INT)floorf(Value + 0.5f);
 }
+#endif
 
 /*-----------------------------------------------------------------------------
 	File functions.
@@ -1059,7 +1062,67 @@ CORE_API INT appAtoi( const char* Str )
 }
 CORE_API FLOAT appAtof( const char* Str )
 {
+	// The Amiga libnix atof() returns a double using an ABI which does not
+	// match this GCC build.  The returned value consequently arrived as 0,
+	// breaking every floating-point config value and input command such as
+	// "Axis aBaseY Speed=+300.0".  Parse directly into FLOAT on Amiga.
+#ifdef PLATFORM_AMIGA
+	while( *Str==' ' || *Str=='\t' || *Str=='\r' || *Str=='\n' )
+		Str++;
+
+	FLOAT Sign = 1.0f;
+	if( *Str=='-' )
+	{
+		Sign = -1.0f;
+		Str++;
+	}
+	else if( *Str=='+' )
+		Str++;
+
+	FLOAT Value = 0.0f;
+	while( *Str>='0' && *Str<='9' )
+	{
+		Value = Value * 10.0f + FLOAT(*Str-'0');
+		Str++;
+	}
+
+	if( *Str=='.' )
+	{
+		Str++;
+		FLOAT Place = 0.1f;
+		while( *Str>='0' && *Str<='9' )
+		{
+			Value += FLOAT(*Str-'0') * Place;
+			Place *= 0.1f;
+			Str++;
+		}
+	}
+
+	if( *Str=='e' || *Str=='E' )
+	{
+		Str++;
+		INT ExponentSign = 1;
+		if( *Str=='-' )
+		{
+			ExponentSign = -1;
+			Str++;
+		}
+		else if( *Str=='+' )
+			Str++;
+
+		INT Exponent = 0;
+		while( *Str>='0' && *Str<='9' )
+		{
+			Exponent = Min( Exponent * 10 + INT(*Str-'0'), 38 );
+			Str++;
+		}
+		while( Exponent-- > 0 )
+			Value = ExponentSign > 0 ? Value * 10.0f : Value * 0.1f;
+	}
+	return Sign * Value;
+#else
 	return atof( Str );
+#endif
 }
 CORE_API INT appStrtoi( const char* Start, char** End, INT Base )
 {

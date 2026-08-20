@@ -63,6 +63,13 @@ void UNSDLClient::Init( UEngine* InEngine )
 	// Init base.
 	UClient::Init( InEngine );
 
+#ifdef PLATFORM_AMIGA
+	// Old Amiga configs could contain zero SDL2 scales.  A zero scale masks
+	// every joystick axis regardless of the SDL 1.2 range.
+	if( ScaleXYZ <= 0.f ) ScaleXYZ = 100.f;
+	if( ScaleRUV <= 0.f ) ScaleRUV = 100.f;
+#endif
+
 	Controller = NULL;
 
 	if ( SDL_Init( SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER ) < 0 )
@@ -74,22 +81,45 @@ void UNSDLClient::Init( UEngine* InEngine )
 	atexit( SDL_Quit );
 
 #ifdef PLATFORM_AMIGA
-	// AmigaMesa needs a large contiguous allocation while creating its
-	// context.  Do this immediately after SDL_Init, before UE loads the map
-	// and thousands of objects, then hand the implicit SDL 1.2 window to the
-	// viewport later.
-	SDL_GL_SetAttribute( SDL_GL_RED_SIZE, 8 );
-	SDL_GL_SetAttribute( SDL_GL_GREEN_SIZE, 8 );
-	SDL_GL_SetAttribute( SDL_GL_BLUE_SIZE, 8 );
-	SDL_GL_SetAttribute( SDL_GL_DOUBLEBUFFER, 1 );
+	// Create the selected renderer's window before loading the map. AmigaMesa
+	// needs its large contiguous context allocation while memory is still
+	// unfragmented; SoftDrv needs the same early window without SDL_OPENGL.
+	char RenderClass[256] = "";
+	// On Amiga the single executable uses GameRenderDevice for both windowed
+	// and fullscreen modes. WindowedRenderDevice is a legacy fallback and
+	// must not override the renderer selected in the in-game menu.
+	GetConfigString( "Engine.Engine", "GameRenderDevice",
+		RenderClass, ARRAY_COUNT(RenderClass) );
+	appStrupr( RenderClass );
+	const UBOOL WantsOpenGL = appStrstr( RenderClass, "OPENGL" ) != NULL;
+	if( WantsOpenGL )
+	{
+		SDL_GL_SetAttribute( SDL_GL_RED_SIZE, 8 );
+		SDL_GL_SetAttribute( SDL_GL_GREEN_SIZE, 8 );
+		SDL_GL_SetAttribute( SDL_GL_BLUE_SIZE, 8 );
+		SDL_GL_SetAttribute( SDL_GL_DOUBLEBUFFER, 1 );
+	}
 	const INT EarlyX = ViewportX > 0 ? ViewportX : 640;
 	const INT EarlyY = ViewportY > 0 ? ViewportY : 480;
-	AmigaDebugLogf( "[Amiga] Client: creating early GL window %dx%d", EarlyX, EarlyY );
+	// Some real Picasso96 drivers (notably VideoCore) cannot reliably turn an
+	// already-created OpenGL window into a public fullscreen screen.  SDL 1.2
+	// ports which work on those drivers request SDL_FULLSCREEN in the initial
+	// SDL_SetVideoMode call, so do the same when startup fullscreen is enabled.
+	const Uint32 EarlyFlags = (WantsOpenGL ? SDL_WINDOW_OPENGL : 0)
+		| (StartupFullscreen ? SDL_WINDOW_FULLSCREEN : 0)
+		| SDL_WINDOW_HIDDEN;
+	AmigaDebugLogf( "[Amiga] Client: creating early %s window %dx%d; startup fullscreen=%d",
+		WantsOpenGL ? "OpenGL" : "Software", EarlyX, EarlyY, (INT)StartupFullscreen );
 	SDL_Window* EarlyWindow = SDL_CreateWindow( "Unreal", SDL_WINDOWPOS_UNDEFINED,
-		SDL_WINDOWPOS_UNDEFINED, EarlyX, EarlyY, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN );
-	AmigaDebugLogf( "[Amiga] Client: early GL window=%p error='%s'", (void*)EarlyWindow, SDL_GetError() );
+		SDL_WINDOWPOS_UNDEFINED, EarlyX, EarlyY, EarlyFlags );
+	AmigaDebugLogf( "[Amiga] Client: early window=%p error='%s'", (void*)EarlyWindow, SDL_GetError() );
 	if( !EarlyWindow )
-		appErrorf( "Could not create early Amiga GL window: %s", SDL_GetError() );
+		appErrorf( "Could not create early Amiga window: %s", SDL_GetError() );
+	// SDL 1.2 exposes the window immediately from SDL_SetVideoMode, even when
+	// the SDL2 compatibility flags say HIDDEN. Grab it now so startup does not
+	// leave the Workbench pointer visible over the game while the map loads.
+	if( CaptureMouse )
+		SDL_SetRelativeMouseMode( SDL_TRUE );
 #endif
 
 	if( SDL_NumJoysticks() > 0 )
@@ -97,8 +127,15 @@ void UNSDLClient::Init( UEngine* InEngine )
 
 	SDL_GameControllerEventState( SDL_ENABLE );
 
+	// SDL 1.2 only fills keysym.unicode after SDL_EnableUNICODE(), exposed by
+	// our compatibility layer as SDL_StartTextInput(). Without it the console
+	// opens, but receives no printable characters.
+#ifdef PLATFORM_SDL12_COMPAT
+	SDL_StartTextInput();
+#else
 	// Not calling SDL_StartTextInput because that pops up on-screen keyboards sometimes.
 	SDL_EventState( SDL_TEXTINPUT, SDL_ENABLE );
+#endif
 
 	SDL_GetDesktopDisplayMode( DefaultDisplay, &DefaultDisplayMode );
 
@@ -358,6 +395,11 @@ void UNSDLClient::TryRenderDevice( UViewport* Viewport, const char* ClassName, U
 {
 	guard(UNSDLClient::TryRenderDevice);
 
+	// Recreating the renderer for a fullscreen toggle does not change the
+	// viewport. Detaching audio here stops and unregisters the current module,
+	// but the level has no new MusicEvent to start it again afterwards.
+	const UBOOL HadRenderDevice = Viewport->RenDev != NULL;
+
 	// Shut down current rendering device.
 	if( Viewport->RenDev )
 	{
@@ -371,7 +413,7 @@ void UNSDLClient::TryRenderDevice( UViewport* Viewport, const char* ClassName, U
 	if( RenderClass )
 	{
 		Viewport->RenDev = ConstructClassObject<URenderDevice>( RenderClass );
-		if( Viewport->Client->Engine->Audio && !GIsEditor )
+		if( !HadRenderDevice && Viewport->Client->Engine->Audio && !GIsEditor )
 			Viewport->Client->Engine->Audio->SetViewport( NULL );
 		if( Viewport->RenDev->Init( Viewport ) )
 		{
@@ -385,7 +427,7 @@ void UNSDLClient::TryRenderDevice( UViewport* Viewport, const char* ClassName, U
 			delete Viewport->RenDev;
 			Viewport->RenDev = NULL;
 		}
-		if( Viewport->Client->Engine->Audio && !GIsEditor )
+		if( !HadRenderDevice && Viewport->Client->Engine->Audio && !GIsEditor )
 			Viewport->Client->Engine->Audio->SetViewport( Viewport );
 	}
 

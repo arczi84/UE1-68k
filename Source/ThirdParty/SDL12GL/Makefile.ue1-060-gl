@@ -1,0 +1,73 @@
+# Full SDL 1.2 build for UE1/AmigaOS 68k.
+# GCC 6.5, 68060 hard-float, OpenGL-enabled ABI, no Apollo/AMMX code.
+
+PREFIX  ?= /opt/amiga
+CC      := $(PREFIX)/bin/m68k-amigaos-gcc
+AS      := $(PREFIX)/bin/m68k-amigaos-as
+AR      := $(PREFIX)/bin/m68k-amigaos-ar
+RANLIB  := $(PREFIX)/bin/m68k-amigaos-ranlib
+
+BUILD   := build-gcc65-060-gl
+OUTPUT  := lib/libSDL_libnix_gcc65_060_videocore.a
+
+CPPFLAGS := \
+	-I$(PREFIX)/include -I./include -I./include/SDL \
+	-I/mnt/d/amiga-gcc2/include \
+	-DNOIXEMUL -D_HAVE_STDINT_H -DENABLE_CYBERGRAPHICS \
+	-DNO_SIGNAL_H -D__MEM_AMIGA -DENABLE_AHI -DNO_AMIGADEBUG \
+	-DSDL_VIDEO_OPENGL=1 -DENABLE_TB=0
+
+CFLAGS := \
+	-O3 -DNDEBUG -fomit-frame-pointer -m68060 -mhard-float -ffast-math \
+	-fno-PIC -fno-pic -noixemul
+
+C_SOURCES := \
+	audio/SDL_audio.c audio/SDL_audiocvt.c audio/SDL_mixer.c \
+	audio/SDL_mixer_m68k.c audio/SDL_wave.c audio/amigaos/SDL_ahiaudio.c \
+	SDL_error.c SDL_fatal.c \
+	video/SDL_RLEaccel.c video/SDL_blit.c video/SDL_blit_0.c \
+	video/SDL_blit_1.c video/SDL_blit_A.c video/SDL_blit_N.c \
+	video/SDL_bmp.c video/SDL_cursor.c video/SDL_pixels.c \
+	video/SDL_surface.c video/SDL_stretch.c video/SDL_yuv.c \
+	video/SDL_yuv_sw.c video/SDL_video.c \
+	video/apollo/triplebuffer.c \
+	timer/amigaos/SDL_systimer.c timer/SDL_timer.c \
+	joystick/SDL_joystick.c joystick/SDL_sysjoystick.c \
+	SDL_cdrom.c SDL_syscdrom.c \
+	events/SDL_quit.c events/SDL_active.c events/SDL_keyboard.c \
+	events/SDL_mouse.c events/SDL_resize.c events/SDL_events.c \
+	file/SDL_rwops.c SDL.c \
+	thread/amigaos/SDL_sysmutex.c thread/amigaos/SDL_syssem.c \
+	thread/amigaos/SDL_systhread.c thread/amigaos/SDL_thread.c \
+	thread/amigaos/SDL_syscond.c \
+	video/amigaos/SDL_cgxvideo.c video/amigaos/SDL_cgxmodes.c \
+	video/amigaos/SDL_cgximage.c video/amigaos/SDL_amigaevents.c \
+	video/amigaos/SDL_amigamouse.c video/amigaos/SDL_cgxgl.c \
+	video/amigaos/SDL_cgxwm.c video/amigaos/SDL_cgxyuv.c \
+	video/amigaos/SDL_cgxaccel.c video/amigaos/SDL_cgxgl_wrapper.c \
+	video/SDL_gamma.c \
+	stdlib/SDL_stdlib.c stdlib/SDL_string.c stdlib/SDL_malloc.c \
+	stdlib/SDL_getenv.c
+
+OBJECTS := $(addprefix $(BUILD)/,$(C_SOURCES:.c=.o))
+OBJECTS += $(BUILD)/SDL_lutstub.o
+
+.PHONY: all clean
+all: $(OUTPUT)
+
+$(OUTPUT): $(OBJECTS)
+	@mkdir -p $(dir $@)
+	$(AR) cr $@ $(OBJECTS)
+	$(RANLIB) $@
+
+$(BUILD)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/SDL_lutstub.o: SDL_lutstub.s
+	@mkdir -p $(dir $@)
+	$(AS) -m68060 -o $@ $<
+
+clean:
+	$(RM) -r $(BUILD)
+	$(RM) $(OUTPUT)

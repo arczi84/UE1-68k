@@ -9,7 +9,19 @@ endif()
 if(AMIGA)
   # Large swapped stack for UE's deep recursion (see AmigaStack.c). Kept a .c
   # file so exec/types.h doesn't collide with the engine's BYTE/WORD typedefs.
-  list(APPEND SRC_FILES "Src/AmigaStack.c")
+  list(APPEND SRC_FILES "Src/AmigaStack.c" "Src/AmigaRawMouse.c")
+
+  # GCC 6's stock gprof sampler is tied to the chipset VBlank interrupt.  RTG
+  # systems can therefore produce call counts but an empty time histogram.
+  # Keep the replacement strictly opt-in so the normal executable is untouched.
+  option(AMIGA_GPROF_TIMER "Use the RTG-safe Amiga gprof sampler" OFF)
+  if(AMIGA_GPROF_TIMER)
+    list(APPEND SRC_FILES "Src/AmigaGprof.c")
+    # This file implements mcount itself, so compiling it with -pg would make
+    # mcount recursively call mcount.
+    set_source_files_properties("Src/AmigaGprof.c"
+      PROPERTIES COMPILE_OPTIONS "-fno-profile")
+  endif()
 endif()
 
 if(VITA)
@@ -51,6 +63,54 @@ else()
 endif()
 
 if(AMIGA)
+  # The stock Amiga SDL 1.2 CGX backend drops SDL_FULLSCREEN when
+  # BestCModeIDTags cannot see a board's 16-bit modes.  VideoCore exposes
+  # RGB16PC modes and triggers exactly that path.  Build the two patched CGX
+  # objects and replace only those members in a private copy of SDL; the SDK's
+  # original library remains untouched.
+  set(SDL_AMIGA_SOURCE_DIR
+      "${CMAKE_SOURCE_DIR}/ThirdParty/SDL12GL")
+  set(SDL_AMIGA_FIX_DIR "${CMAKE_BINARY_DIR}/SDLAmigaVideoFix")
+  set(SDL_AMIGA_FIX_LIB "${SDL_AMIGA_FIX_DIR}/libSDL_libnix_ue1.a")
+  set(SDL_AMIGA_FIX_FLAGS
+      -I${AMIGA_TOOLCHAIN_ROOT}/include
+      -I${SDL_AMIGA_SOURCE_DIR}
+      -I${SDL_AMIGA_SOURCE_DIR}/include
+      -I${SDL_AMIGA_SOURCE_DIR}/include/SDL
+      -I${AMIGA_SDK_ROOT}/include
+      -O3 -fomit-frame-pointer -m${AMIGA_CPU} -mhard-float -ffast-math
+      -noixemul -fno-PIC -fno-pic
+      -DNOIXEMUL -D_HAVE_STDINT_H -DNO_AMIGADEBUG
+      -DENABLE_CYBERGRAPHICS -DNO_SIGNAL_H -D__MEM_AMIGA -DENABLE_AHI
+      # Must match the ABI of libSDL_libnix.a.  Its SDL_VideoDevice contains
+      # the SDL 1.2 OpenGL procedure table even when Unreal uses SoftDrv.
+      -DSDL_VIDEO_OPENGL=1)
+
+  add_custom_command(
+    OUTPUT "${SDL_AMIGA_FIX_LIB}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${SDL_AMIGA_FIX_DIR}"
+    COMMAND "${CMAKE_C_COMPILER}" ${SDL_AMIGA_FIX_FLAGS}
+            -c "${SDL_AMIGA_SOURCE_DIR}/video/amigaos/SDL_cgxvideo.c"
+            -o "${SDL_AMIGA_FIX_DIR}/SDL_cgxvideo.go"
+    COMMAND "${CMAKE_C_COMPILER}" ${SDL_AMIGA_FIX_FLAGS}
+            -c "${SDL_AMIGA_SOURCE_DIR}/video/amigaos/SDL_cgxmodes.c"
+            -o "${SDL_AMIGA_FIX_DIR}/SDL_cgxmodes.go"
+    COMMAND "${CMAKE_COMMAND}" -E copy
+            "${AMIGA_SDK_ROOT}/lib/libSDL_libnix.a" "${SDL_AMIGA_FIX_LIB}"
+    COMMAND "${CMAKE_AR}" r "${SDL_AMIGA_FIX_LIB}"
+            "${SDL_AMIGA_FIX_DIR}/SDL_cgxvideo.go"
+            "${SDL_AMIGA_FIX_DIR}/SDL_cgxmodes.go"
+    COMMAND "${CMAKE_RANLIB}" "${SDL_AMIGA_FIX_LIB}"
+    DEPENDS
+      "${SDL_AMIGA_SOURCE_DIR}/video/amigaos/SDL_cgxvideo.c"
+      "${SDL_AMIGA_SOURCE_DIR}/video/amigaos/SDL_cgxmodes.c"
+      "${SDL_AMIGA_SOURCE_DIR}/video/amigaos/SDL_cgxgl_c.h"
+      "${SDL_AMIGA_SOURCE_DIR}/video/SDL_sysvideo.h"
+      "${AMIGA_SDK_ROOT}/lib/libSDL_libnix.a"
+    VERBATIM)
+  add_custom_target(SDLAmigaVideoFix DEPENDS "${SDL_AMIGA_FIX_LIB}")
+  add_dependencies(${PROJECT_NAME} SDLAmigaVideoFix)
+
   # Custom linker script: gathers C++ global constructors into a dense
   # [__UE_CTOR_START, __UE_CTOR_END) array that main() runs itself, since
   # libnix's crt never walks the constructor list. -T replaces the default
@@ -66,7 +126,7 @@ if(AMIGA)
   # libSDL_libnix).
   target_link_libraries(${PROJECT_NAME}
     "-L${AMIGA_SDK_ROOT}/lib"
-    -Wl,--start-group -lSDL_libnix -lGL -Wl,--end-group
+    -Wl,--start-group "${SDL_AMIGA_FIX_LIB}" -lGL -Wl,--end-group
     -lpthread
     -lm
     -ldebug

@@ -8,6 +8,11 @@ Revision history:
 
 #include "EnginePrivate.h"
 
+#ifdef PLATFORM_AMIGA
+extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+static INT GAmigaKeyTraceRemaining = 24;
+#endif
+
 /*-----------------------------------------------------------------------------
 	Internal.
 -----------------------------------------------------------------------------*/
@@ -269,6 +274,9 @@ UBOOL UInput::Exec( const char* Str, FOutputDevice* Out )
 		{
 			FLOAT Speed=1.0;
 			Parse( Str, "SPEED=", Speed );
+#ifdef PLATFORM_AMIGA
+			const FLOAT Before = *Axis;
+#endif
 			if( GetInputAction() == IST_Axis )
 			{
 				*Axis += 0.01 * GetInputDelta() * Speed;
@@ -277,6 +285,18 @@ UBOOL UInput::Exec( const char* Str, FOutputDevice* Out )
 			{
 				*Axis += GetInputDelta() * Speed;
 			}
+#ifdef PLATFORM_AMIGA
+			if( GAmigaKeyTraceRemaining > 0 && appStricmp(Temp,"aBaseY")==0 )
+			{
+				const INT PropertyOffset = (BYTE*)Axis - (BYTE*)Viewport->Actor;
+				INT CppOffset = -1;
+				if( Viewport->Actor->IsA(APlayerPawn::StaticClass) )
+					CppOffset = (BYTE*)&((APlayerPawn*)Viewport->Actor)->aBaseY - (BYTE*)Viewport->Actor;
+				AmigaDebugLogf( "[Amiga] KEYDIAG axis=%s action=%d delta=%.6f speed=%.3f before=%.3f after=%.3f propOff=%d cppOff=%d",
+					Temp, (INT)GetInputAction(), GetInputDelta(), Speed, Before, *Axis, PropertyOffset, CppOffset );
+				--GAmigaKeyTraceRemaining;
+			}
+#endif
 		}
 		else Out->Logf( "Bad Axis command" );
 		return 1;
@@ -347,6 +367,15 @@ UBOOL UInput::Process( FOutputDevice& Out, EInputKey iKey, EInputAction State, F
 			KeyDownTable[iKey] = 0;
 			break;
 	}
+
+#ifdef PLATFORM_AMIGA
+	if( GAmigaKeyTraceRemaining > 0 && (iKey==IK_W || iKey==IK_Up) )
+	{
+		AmigaDebugLogf( "[Amiga] KEYDIAG key=%s action=%d delta=%.6f down=%d binding='%s'",
+			GetKeyName(iKey), (INT)State, Delta, (INT)KeyDownTable[iKey], *Bindings[iKey] );
+		--GAmigaKeyTraceRemaining;
+	}
+#endif
 
 	// Make sure there is a binding.
 	if( Bindings[iKey].Length()==0 )

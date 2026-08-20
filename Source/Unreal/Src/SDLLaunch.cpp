@@ -16,9 +16,17 @@ extern "C" {HINSTANCE hInstance;}
 extern "C" {char GCC_HIDDEN THIS_PACKAGE[64]="Launch";}
 #ifdef PLATFORM_AMIGA
 extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+#ifdef UE_AMIGA_GPROF
+#include <unistd.h>
+// libnix does not select gcrt0.o for -pg, so its profiler must be started and
+// flushed explicitly.  The normal Amiga build remains completely unaffected.
+extern "C" void _monstartup();
+extern "C" void _moncleanup();
+#endif
 // Shared with realtime/procedural textures, whose legacy DOUBLE->FLOAT timing
 // path is unreliable with this 68k soft-float runtime.
 FLOAT GAmigaFrameDeltaSeconds = 1.0f / 30.0f;
+DWORD GAmigaFrameSerial = 1;
 static INT GAmigaTimingTraceRemaining = 4;
 #endif
 
@@ -227,7 +235,12 @@ void MainLoop( UEngine* Engine )
 		const DWORD AmigaDeltaMillis = AmigaNewTicks - AmigaOldTicks;
 		AmigaOldTicks = AmigaNewTicks;
 		AmigaEngineMillis += AmigaDeltaMillis;
-		GAmigaFrameDeltaSeconds = (FLOAT)AmigaDeltaMillis * 0.001f;
+		// Do not feed a multi-second disk/audio stall back into simulation.
+		// Besides exploding walking-physics substeps, an unbounded delta makes
+		// Nyleve's animated sky panners jump far enough to collapse into bands.
+		// Normal frames are unchanged; only gaps above 100 ms are clamped.
+		GAmigaFrameDeltaSeconds = (FLOAT)Min<DWORD>(AmigaDeltaMillis, 100) * 0.001f;
+		++GAmigaFrameSerial;
 		Engine->Tick( GAmigaFrameDeltaSeconds );
 #else
 		DOUBLE NewTime = appSeconds();
@@ -276,6 +289,11 @@ void ExitEngine( UEngine* Engine )
 {
 	guard(ExitEngine);
 
+#ifdef PLATFORM_AMIGA
+	// The low-level exit used below skips FConfigCache's global destructor.
+	// Flush dirty .ini files while the object/config systems are still alive.
+	SaveAllConfigs();
+#endif
 	GObj.Exit();
 	GMem.Exit();
 	GDynMem.Exit();
@@ -307,15 +325,30 @@ static int GAmigaCtorsRun = 0; // diagnostic: how many ctors actually fired.
 
 // Append a diagnostic line to a file next to the executable, so startup traces
 // survive even when stderr goes to a console we can't capture. Opens/closes
-// each call (flushes immediately) — startup is not perf-critical.
+// Keep the normal 68k build quiet. Opening and closing this file for every
+// package, texture and input event makes map startup needlessly expensive on
+// an emulated Amiga disk. Only retain failures and the one-shot automatic
+// slow-frame report.
 extern "C" void AmigaDebugLog( const char* Msg )
 {
-	FILE* F = fopen( "PROGDIR:startup-debug.log", "a" );
+	if
+	(	!strstr(Msg,"AUTO")
+	&&	!strstr(Msg,"FAIL")
+	&&	!strstr(Msg,"Error")
+	&&	!strstr(Msg,"ERROR")
+	&&	!strstr(Msg,"Critical")
+	&&	!strstr(Msg,"threw")
+	&&	!strstr(Msg,"crash") )
+		return;
+
+	static FILE* F = NULL;
+	if( !F )
+		F = fopen( "PROGDIR:startup-debug.log", "w" );
 	if( F )
 	{
 		fputs( Msg, F );
 		fputc( '\n', F );
-		fclose( F );
+		fflush( F );
 	}
 }
 
@@ -380,7 +413,19 @@ int main( int argc, const char** argv )
 #else
 	hInstance = NULL;
 	// Remember arguments since we don't have GetCommandLine().
+#ifdef PLATFORM_AMIGA
+	// Use one canonical configuration name regardless of whether Workbench
+	// launches Unreal or the Unreal-hard compatibility alias.
+	const char* IniArgv[64];
+	IniArgv[0] = argc>0 ? argv[0] : "Unreal";
+	INT IniArgc = 1;
+	for( INT i=1; i<argc && IniArgc<(INT)ARRAY_COUNT(IniArgv)-1; ++i )
+		IniArgv[IniArgc++] = argv[i];
+	IniArgv[IniArgc++] = "-INI=Unreal.ini";
+	appSetCmdLine( IniArgc, IniArgv );
+#else
 	appSetCmdLine( argc, argv );
+#endif
 	PlatformPreInit();
 #endif
 
@@ -454,8 +499,119 @@ extern "C" void EXIT_8_OpenLibs();
 extern "C" void AmigaLowLevelExit( int Result ) __asm__("____exit");
 extern "C" void* glBase;
 
+// The SDL 1.2 backend has no hidden-window support: SDL_WINDOW_HIDDEN is
+// discarded by the compatibility shim.  The pre-stack AmigaMesa context must
+// therefore be created at the saved viewport size immediately.  Creating it
+// at 640x480 and shrinking it later leaves the old 640x480 drawable visible
+// outside a 320x240 Intuition window until Workbench happens to repaint it.
+static void AmigaReadEarlyViewportSize( int& Width, int& Height )
+{
+	Width = 640;
+	Height = 480;
+
+	FILE* Ini = fopen( "PROGDIR:Unreal.ini", "r" );
+	if( !Ini )
+		return;
+
+	char Line[256];
+	int InSDLClient = 0;
+	while( fgets( Line, sizeof(Line), Ini ) )
+	{
+		if( Line[0] == '[' )
+		{
+			InSDLClient = strncmp( Line, "[NSDLDrv.NSDLClient]", 20 ) == 0;
+			continue;
+		}
+		if( InSDLClient )
+		{
+			int Value;
+			if( sscanf( Line, "ViewportX=%d", &Value ) == 1 && Value >= 160 && Value <= 4096 )
+				Width = Value;
+			else if( sscanf( Line, "ViewportY=%d", &Value ) == 1 && Value >= 120 && Value <= 4096 )
+				Height = Value;
+		}
+	}
+	fclose( Ini );
+
+	// Match UNSDLViewport::OpenWindow's horizontal alignment.
+	Width = (Width + 3) & ~3;
+}
+
+// Read the renderer before the UE object/config systems exist. The launcher
+// must know whether its early SDL 1.2 surface may use SDL_OPENGL: a GL surface
+// has no writable pixels and therefore cannot be reused by SoftDrv.
+static int AmigaReadEarlyUseOpenGL()
+{
+	int UseOpenGL = 1;
+	FILE* Ini = fopen( "PROGDIR:Unreal.ini", "r" );
+	if( !Ini )
+		return UseOpenGL;
+
+	char Line[256];
+	int InEngine = 0;
+	while( fgets( Line, sizeof(Line), Ini ) )
+	{
+		if( Line[0] == '[' )
+		{
+			InEngine = strncmp( Line, "[Engine.Engine]", 15 ) == 0;
+			continue;
+		}
+		if( InEngine && strncmp( Line, "GameRenderDevice=", 17 ) == 0 )
+		{
+			UseOpenGL = strstr( Line + 17, "SoftDrv.SoftwareRenderDevice" ) == NULL;
+			break;
+		}
+	}
+	fclose( Ini );
+	return UseOpenGL;
+}
+
+// VideoCore's SDL/CyberGraphics backend can open a fullscreen screen when
+// SDL_FULLSCREEN is present in the first SDL_SetVideoMode call, but may fall
+// back to a Workbench window when an existing window is switched afterwards.
+// Read this setting before the UE config system exists so the pre-stack video
+// surface is created in the requested mode immediately.
+static int AmigaReadEarlyFullscreen()
+{
+	int Fullscreen = 0;
+	FILE* Ini = fopen( "PROGDIR:Unreal.ini", "r" );
+	if( !Ini )
+		return Fullscreen;
+
+	char Line[256];
+	int InClient = 0;
+	while( fgets( Line, sizeof(Line), Ini ) )
+	{
+		if( Line[0] == '[' )
+		{
+			InClient = strncmp( Line, "[NSDLDrv.NSDLClient]", 20 ) == 0;
+			continue;
+		}
+		if( InClient && strncmp( Line, "StartupFullscreen=", 18 ) == 0 )
+		{
+			const char* Value = Line + 18;
+			Fullscreen = atoi( Value ) != 0
+				|| strncmp( Value, "True", 4 ) == 0
+				|| strncmp( Value, "true", 4 ) == 0;
+			break;
+		}
+	}
+	fclose( Ini );
+	return Fullscreen;
+}
+
+// AmigaStack.c also needs this when deciding whether it may close the GL
+// libraries after the swapped-stack engine run.
+extern "C" int GAmigaUseOpenGL = 1;
+
 int main( int argc, const char** argv )
 {
+#ifdef UE_AMIGA_GPROF
+	// main's own injected mcount runs before this call while profiling is
+	// disabled.  Start collection before any engine or SDL work begins.
+	_monstartup();
+#endif
+
 	{ FILE* F=fopen("PROGDIR:startup-debug.log","w"); if(F) fclose(F); }
 
 	// One-shot: does C++ exception unwinding actually work under libnix/68k?
@@ -471,31 +627,58 @@ int main( int argc, const char** argv )
 		if(f){ fprintf(f,"after try, ok\n"); fclose(f); }
 	}
 
-	AmigaDebugLogf( "[Amiga] PreStack GL: glBase before init=%p", glBase );
-	INIT_8_OpenLibs();
-	AmigaDebugLogf( "[Amiga] PreStack GL: glBase after init=%p", glBase );
+	GAmigaUseOpenGL = AmigaReadEarlyUseOpenGL();
+	if( GAmigaUseOpenGL )
+	{
+		AmigaDebugLogf( "[Amiga] PreStack GL: glBase before init=%p", glBase );
+		INIT_8_OpenLibs();
+		AmigaDebugLogf( "[Amiga] PreStack GL: glBase after init=%p", glBase );
+	}
 
-	// Create the SDL 1.2/AmigaMesa context on the original process stack.
+	// Create the selected SDL surface on the original process stack. OpenGL
+	// gets its AmigaMesa context early; Software gets a writable RGB565 surface.
 	// UE itself still runs on the large swapped stack below.
-	AmigaDebugLog( "[Amiga] PreStack GL: before SDL_Init" );
+	AmigaDebugLog( "[Amiga] PreStack: before SDL_Init" );
 	if( SDL_Init( SDL_INIT_VIDEO ) == 0 )
 	{
-		SDL_GL_SetAttribute( SDL_GL_RED_SIZE, 8 );
-		SDL_GL_SetAttribute( SDL_GL_GREEN_SIZE, 8 );
-		SDL_GL_SetAttribute( SDL_GL_BLUE_SIZE, 8 );
-		SDL_GL_SetAttribute( SDL_GL_DOUBLEBUFFER, 1 );
-		AmigaDebugLog( "[Amiga] PreStack GL: before SDL_CreateWindow" );
+		if( GAmigaUseOpenGL )
+		{
+			SDL_GL_SetAttribute( SDL_GL_RED_SIZE, 8 );
+			SDL_GL_SetAttribute( SDL_GL_GREEN_SIZE, 8 );
+			SDL_GL_SetAttribute( SDL_GL_BLUE_SIZE, 8 );
+			SDL_GL_SetAttribute( SDL_GL_DOUBLEBUFFER, 1 );
+		}
+		int EarlyWidth, EarlyHeight;
+		AmigaReadEarlyViewportSize( EarlyWidth, EarlyHeight );
+		const int EarlyFullscreen = AmigaReadEarlyFullscreen();
+		AmigaDebugLog( "[Amiga] PreStack: before SDL_CreateWindow" );
 		SDL_Window* EarlyWindow = SDL_CreateWindow( "Unreal", SDL_WINDOWPOS_UNDEFINED,
-			SDL_WINDOWPOS_UNDEFINED, 640, 480, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN );
-		AmigaDebugLogf( "[Amiga] PreStack GL: window=%p error='%s'", (void*)EarlyWindow, SDL_GetError() );
+			SDL_WINDOWPOS_UNDEFINED, EarlyWidth, EarlyHeight,
+			(GAmigaUseOpenGL ? SDL_WINDOW_OPENGL : 0)
+				| (EarlyFullscreen ? SDL_WINDOW_FULLSCREEN : 0)
+				| SDL_WINDOW_HIDDEN );
+		AmigaDebugLogf( "[Amiga] PreStack: renderer=%s fullscreen=%d window=%p error='%s'",
+			GAmigaUseOpenGL ? "OpenGL" : "Software", EarlyFullscreen,
+			(void*)EarlyWindow, SDL_GetError() );
 	}
 	else
 	{
-		AmigaDebugLogf( "[Amiga] PreStack GL: SDL_Init failed: %s", SDL_GetError() );
+		AmigaDebugLogf( "[Amiga] PreStack: SDL_Init failed: %s", SDL_GetError() );
 	}
 	const int Result = AmigaRunWithStack( argc, argv, &UnrealMain );
-	AmigaDebugLog( "[Amiga] main: engine exited; closing GL libraries" );
-	EXIT_8_OpenLibs();
+	if( GAmigaUseOpenGL )
+	{
+		AmigaDebugLog( "[Amiga] main: engine exited; closing GL libraries" );
+		EXIT_8_OpenLibs();
+	}
+#ifdef UE_AMIGA_GPROF
+	// AmigaLowLevelExit deliberately bypasses exit()/atexit(), so flush here.
+	// Make the otherwise relative "gmon.out" name deterministic.
+	AmigaDebugLog( "[Amiga] gprof: writing PROGDIR:gmon.out" );
+	if( chdir( "PROGDIR:" ) != 0 )
+		AmigaDebugLog( "[Amiga] gprof: could not chdir to PROGDIR:" );
+	_moncleanup();
+#endif
 	AmigaDebugLog( "[Amiga] main: clean low-level exit" );
 	AmigaLowLevelExit( Result );
 	return Result; // AmigaLowLevelExit does not return; keeps the compiler satisfied.

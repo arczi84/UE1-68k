@@ -11,6 +11,7 @@
 =============================================================================*/
 
 #include "EnginePrivate.h"
+
 /*-----------------------------------------------------------------------------
 	APawn object implementation.
 -----------------------------------------------------------------------------*/
@@ -770,6 +771,24 @@ void APawn::execFindPathToward( FFrame& Stack, BYTE*& Result )
 		*(AActor**)Result = NULL; 
 		return;
 	}
+	#ifdef PLATFORM_AMIGA
+	// The full reachability setup for scripted patrols can block the 68k port
+	// for 15-18 seconds before the bounded BFS is even entered.  Patrol code
+	// already handles MoveToward/HitWall retries, so let it move directly toward
+	// its navigation point instead of freezing the entire game here.
+	if
+	(	!bIsPlayer
+	&&	goal->IsA( ANavigationPoint::StaticClass )
+	&&	GetMainFrame()
+	&&	GetMainFrame()->StateNode
+	&&	appStricmp( GetMainFrame()->StateNode->GetName(), "Patroling" ) == 0 )
+	{
+		SpecialPause = 0.0;
+		bShootSpecial = 0;
+		*(AActor**)Result = goal;
+		return;
+	}
+	#endif
 	uclock(XLevel->FindPathCycles);
 	AActor * bestPath = NULL;
 	AActor * newPath;

@@ -4,7 +4,7 @@
 
 #include "AL/al.h"
 #include "AL/alc.h"
-#include "xmp.h"
+#include "libmodplug/modplug.h"
 #include "Engine.h"
 
 /*------------------------------------------------------------------------------------
@@ -23,7 +23,13 @@
 
 #define DEFAULT_OUTPUT_RATE 44100
 
+#ifdef PLATFORM_AMIGA
+// libmodplug returns quickly on 68k.  A 16 KiB block gives OpenAL/AHI about
+// 186 ms at 22.05 kHz stereo, avoiding an underrun between slower frames.
+#define STREAM_BUFSIZE 16384
+#else
 #define STREAM_BUFSIZE 32768
+#endif
 
 // World scale related constants, same as in ALAudio 2.4.7.
 #define DISTANCE_SCALE 0.023255814f
@@ -51,6 +57,7 @@ class DLL_EXPORT UNOpenALAudioSubsystem : public UAudioSubsystem
 	UNOpenALAudioSubsystem();
 
 	// UObject interface.
+	virtual void Serialize( FArchive& Ar ) override;
 	virtual void Destroy() override;
 	virtual void PostEditChange() override;
 	virtual void ShutdownAfterError() override;
@@ -83,7 +90,7 @@ private:
 	UBOOL ReverbOn;
 	AZoneInfo* ReverbZone;
 
-	xmp_context MusicCtx;
+	ModPlugFile* MusicFile;
 	UMusic* Music;
 	FLOAT MusicFade;
 	DOUBLE MusicTime;
@@ -96,6 +103,9 @@ private:
 	ALuint MusicBuffers[NUM_MUSIC_BUFFERS];
 	ALuint FreeMusicBuffers[NUM_MUSIC_BUFFERS];
 	INT NumFreeMusicBuffers;
+#ifdef PLATFORM_AMIGA
+	INT StartupFadeStep;
+#endif
 
 	volatile UBOOL MusicThreadRunning;
 	FMutex MusicMutex { "MusicMutex" };

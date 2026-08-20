@@ -85,9 +85,9 @@ SDL_Window* SDL_GetMouseFocus( void );
 	GL context. SDL 1.2 creates the context inside SDL_SetVideoMode.
 -----------------------------------------------------------------------------*/
 
-#define SDL_GL_CONTEXT_MAJOR_VERSION        17
-#define SDL_GL_CONTEXT_MINOR_VERSION        18
-#define SDL_GL_CONTEXT_PROFILE_MASK         21
+#define SDL_GL_CONTEXT_MAJOR_VERSION        ((SDL_GLattr)17)
+#define SDL_GL_CONTEXT_MINOR_VERSION        ((SDL_GLattr)18)
+#define SDL_GL_CONTEXT_PROFILE_MASK         ((SDL_GLattr)21)
 #define SDL_GL_CONTEXT_PROFILE_COMPATIBILITY 0x0002
 #define SDL_GL_CONTEXT_PROFILE_ES           0x0004
 
@@ -179,21 +179,28 @@ int SDL_ShowSimpleMessageBox( Uint32 Flags, const char* Title, const char* Messa
 int SDL_ShowMessageBox( const SDL_MessageBoxData* Data, int* ButtonId );
 
 /*-----------------------------------------------------------------------------
-	Game controllers: not supported on 68k. Stubbed out.
+	Game controllers: map the SDL2 subset onto SDL 1.2 joysticks.
 -----------------------------------------------------------------------------*/
 
-#define SDL_INIT_GAMECONTROLLER 0
+#define SDL_INIT_GAMECONTROLLER SDL_INIT_JOYSTICK
 
-typedef struct SDL_GameController SDL_GameController;
+typedef SDL_Joystick SDL_GameController;
 typedef int SDL_GameControllerAxis;
 typedef int SDL_GameControllerButton;
 
 #define SDL_CONTROLLER_AXIS_MAX   6
 #define SDL_CONTROLLER_BUTTON_MAX 15
 
-#define SDL_GameControllerOpen( i )        ((SDL_GameController*)NULL)
-#define SDL_GameControllerClose( c )       ((void)0)
-#define SDL_GameControllerEventState( s )  (0)
+#define SDL_GameControllerOpen( i )        SDL_JoystickOpen( i )
+#define SDL_GameControllerClose( c )       SDL_JoystickClose( c )
+#define SDL_GameControllerEventState( s )  SDL_JoystickEventState( s )
+
+/* SDL 1.2 event names and union members. */
+#define SDL_CONTROLLERAXISMOTION  SDL_JOYAXISMOTION
+#define SDL_CONTROLLERBUTTONDOWN  SDL_JOYBUTTONDOWN
+#define SDL_CONTROLLERBUTTONUP    SDL_JOYBUTTONUP
+#define caxis                      jaxis
+#define cbutton                    jbutton
 
 /*-----------------------------------------------------------------------------
 	Events that do not exist in SDL 1.2. Values must not collide with the
@@ -202,9 +209,6 @@ typedef int SDL_GameControllerButton;
 
 #define SDL_MOUSEWHEEL            64
 #define SDL_TEXTINPUT             65
-#define SDL_CONTROLLERAXISMOTION  66
-#define SDL_CONTROLLERBUTTONDOWN  67
-#define SDL_CONTROLLERBUTTONUP    68
 
 /*-----------------------------------------------------------------------------
 	Scancodes. SDL 1.2 has no scancode layer, so map onto SDLK_* keysyms.
@@ -267,9 +271,10 @@ typedef int SDL_Scancode;
 #define SDL_SCANCODE_F24          (SDLK_F15+12)
 
 /*-----------------------------------------------------------------------------
-	Renderer / Texture (SDL2 accelerated-blit path). Amiga always uses GL, so
-	this path is never taken, but it must still compile. Provide the types and
-	no-op stubs.
+	Renderer / Texture (SDL2 software-blit path). This is what SoftDrv uses to
+	get at a framebuffer, so on SDL 1.2 it is backed for real: a texture is a
+	malloc'd staging buffer that SDL_RenderCopy converts into the video
+	surface set up by SDL_SetVideoMode.
 -----------------------------------------------------------------------------*/
 
 typedef struct SDL_Renderer SDL_Renderer;
@@ -278,11 +283,15 @@ typedef struct SDL_Texture SDL_Texture;
 #define SDL_RENDERER_SOFTWARE       0x00000001
 #define SDL_TEXTUREACCESS_STREAMING 1
 
-/* Pixel format helpers. ARGB8888 = 4 bytes/pixel, not 565. */
+/* Pixel format helpers. The engine only ever asks for these two. */
 #define SDL_PIXELFORMAT_ARGB8888    0x16362004
+#define SDL_PIXELFORMAT_RGB565      0x15151002
+#define SDL_PIXELFORMAT_RGB555      0x15130f01
 #define SDL_PACKEDLAYOUT_565        1
+/* 4 bytes for ARGB8888, 2 for the 16-bit formats. Anything else is not a
+   format this shim hands out, so 2 is the safe (smaller) assumption. */
 #define SDL_BYTESPERPIXEL( fmt )    (((fmt) == SDL_PIXELFORMAT_ARGB8888) ? 4 : 2)
-#define SDL_PIXELLAYOUT( fmt )      (0)
+#define SDL_PIXELLAYOUT( fmt )      (((fmt) == SDL_PIXELFORMAT_RGB565) ? SDL_PACKEDLAYOUT_565 : 0)
 
 SDL_Renderer* SDL_CreateRenderer( SDL_Window* Win, int Index, Uint32 Flags );
 void          SDL_DestroyRenderer( SDL_Renderer* Ren );
