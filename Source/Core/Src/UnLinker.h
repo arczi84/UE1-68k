@@ -6,6 +6,10 @@
 		* Created by Tim Sweeney
 =============================================================================*/
 
+#ifdef PLATFORM_AMIGA
+extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+#endif
+
 /*-----------------------------------------------------------------------------
 	FObjectExport.
 -----------------------------------------------------------------------------*/
@@ -438,6 +442,9 @@ class ULinkerLoad : public ULinker, public FArchiveFileLoad
 	,	LoadFlags( InLoadFlags )
 	{
 		guard(ULinkerLoad::ULinkerLoad);
+#ifdef PLATFORM_AMIGA
+		AmigaDebugLogf( "[Amiga] ULinkerLoad ctor: file '%s' opened OK, entering...", InFilename );
+#endif
 		debugf( "Loading: %s", InParent->GetFullName() );
 
 		// Error if linker already loaded.
@@ -459,12 +466,20 @@ class ULinkerLoad : public ULinker, public FArchiveFileLoad
 		unguard;
 
 		// Read summary from file.
+#ifdef PLATFORM_AMIGA
+		AmigaDebugLogf( "[Amiga] ULinkerLoad: about to read Summary (FileSize=%d)...", FileSize );
+#endif
 		guard(LoadSummary);
 		*this << Summary;
 		ArVer = Summary.FileVersion;
 		if( Cast<UPackage>(LinkerRoot) )
 			Cast<UPackage>(LinkerRoot)->PackageFlags = Summary.PackageFlags;
 		unguard;
+#ifdef PLATFORM_AMIGA
+		AmigaDebugLogf( "[Amiga] Linker '%s': Ver=%d Tag=%08x Names=%d Imports=%d Exports=%d Heritage=%d",
+			Filename, Summary.FileVersion, (unsigned)Summary.Tag,
+			Summary.NameCount, Summary.ImportCount, Summary.ExportCount, Summary.HeritageCount );
+#endif
 		//if( Summary.FileVersion < 61 )
 		//	debugf("!!!!!!!!!!!!!!!!!!!!!%s %i",Filename,Summary.FileVersion);
 
@@ -540,6 +555,9 @@ class ULinkerLoad : public ULinker, public FArchiveFileLoad
 		}
 		unguard;
 
+#ifdef PLATFORM_AMIGA
+		AmigaDebugLogf( "[Amiga] Linker: names/imports/exports loaded OK, generating export info..." );
+#endif
 		// Generate export in-memory info.
 		guard(GenerateExportInfo);
 		for( INT i=0; i<Summary.ExportCount; i++ )

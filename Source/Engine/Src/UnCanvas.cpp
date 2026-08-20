@@ -57,7 +57,9 @@ void UCanvas::DrawTile
 	Texture->GetInfo( Info, Viewport->CurrentTime );
 	U *= Info.UScale; UL *= Info.UScale;
 	V *= Info.VScale; VL *= Info.VScale;
-	Viewport->RenDev->DrawTile( Frame, Info, X, Y, XL, YL, U, V, UL, VL, SpanBuffer, Z, Color, Fog, PolyFlags );
+	// Canvas primitives are screen overlays. Mark every one explicitly so a
+	// hardware renderer does not depth-test them on the exact near plane.
+	Viewport->RenDev->DrawTile( Frame, Info, X, Y, XL, YL, U, V, UL, VL, SpanBuffer, Z, Color, Fog, PolyFlags | PF_RenderHint );
 
 	unguard;
 }

@@ -407,9 +407,32 @@ inline void* operator new(size_t Size )
 inline void operator delete( void* Ptr )
 {
 	guard( "operator delete" );
-	appFree( Ptr );
+	if( Ptr )
+		appFree( Ptr );
 	unguard;
 }
+#if defined(PLATFORM_AMIGA) || (defined(PLATFORM_POSIX) && !defined(PLATFORM_PSVITA))
+// The Amiga C++ runtime (libsupc++) supplies operator new[]/delete[], but the
+// gcc15 build links against gcc 6.5's libsupc++, where size_t is unsigned int
+// (mangled _Znaj) while gcc15 emits calls to _Znam (size_t=unsigned long) — so
+// the array operators never resolve. Define them here (mapping to the same
+// app allocator as the scalar ones) so codegen matches the compiler's size_t.
+// Harmless for the 6.5 build: it just uses these instead of libsupc++'s.
+// Also needed for the native Linux x86 sanity build (verifies game data).
+inline void* operator new[]( size_t Size )
+{
+	guard( "operator new[]" );
+	return appMalloc( Size, "new[]" );
+	unguard;
+}
+inline void operator delete[]( void* Ptr )
+{
+	guard( "operator delete[]" );
+	if( Ptr )
+		appFree( Ptr );
+	unguard;
+}
+#endif
 
 /*-----------------------------------------------------------------------------
 	Fast inline memory copy/fill functions.

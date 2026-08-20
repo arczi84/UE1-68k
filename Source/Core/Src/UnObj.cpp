@@ -6,7 +6,13 @@
 		* Created by Tim Sweeney
 =============================================================================*/
 
-#include "CorePrivate.h" 
+#include "CorePrivate.h"
+
+#ifdef PLATFORM_AMIGA
+// Startup diagnostics logger, defined in the Unreal launcher; writes to
+// PROGDIR:startup-debug.log so traces survive without a capturable console.
+extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+#endif
 
 /*-----------------------------------------------------------------------------
 	Globals.
@@ -110,6 +116,10 @@ UBOOL UObject::IsValid()
 	else if( !GObj.Objects.IsValidIndex(GetIndex()) )
 	{
 		debugf( NAME_Warning, "Invalid object index %i", GetIndex() );
+#ifdef PLATFORM_AMIGA
+		AmigaDebugLogf( "[Amiga] IsValid FAIL: this=%p Index=%d &Objects=%p Objects.Num=%d",
+			(void*)this, GetIndex(), (void*)&GObj.Objects, GObj.Objects.Num() );
+#endif
 		return 0;
 	}
 	else if( GObj.Objects(GetIndex())!=this )
@@ -350,6 +360,13 @@ UObject::~UObject()
 	// If not initialized, skip out.
 	if( GObj.Initialized && !GIsCriticalError )
 	{
+#ifdef PLATFORM_AMIGA
+		// Guard: if the object table has been torn down (e.g. we're running
+		// C++ global destructors at process teardown, where the intrinsic
+		// UClass globals get destroyed after Objects.Empty()), don't touch it.
+		if( GObj.Objects.Num()==0 || !GObj.Objects.IsValidIndex(GetIndex()) )
+			return;
+#endif
 		// Validate it.
 		check(IsValid());
 
@@ -1121,10 +1138,28 @@ void FObjectManager::Init()
 	// Note initialized.
 	Initialized = 1;
 
+#ifdef PLATFORM_AMIGA
+	AmigaDebugLogf( "[Amiga] GObj.Init: UPackage::StaticClass=%p UClass::StaticClass=%p",
+		(void*)UPackage::StaticClass, (void*)UClass::StaticClass );
+	if( UPackage::StaticClass )
+		AmigaDebugLogf( "[Amiga]   UPackage PropertiesSize=%d",
+			UPackage::StaticClass->GetPropertiesSize() ), fflush( stderr );
+	AmigaDebugLogf( "[Amiga] GObj.Init: allocating TransientPackage..." );
+#endif
 	// Allocate special packages.
 	TransientPackage = new( NULL, "Transient" )UPackage;
+#ifdef PLATFORM_AMIGA
+	AmigaDebugLogf( "[Amiga] GObj.Init: TransientPackage=%p, AddToRoot...", (void*)TransientPackage );
+#endif
 	AddToRoot( TransientPackage );
+#ifdef PLATFORM_AMIGA
+	AmigaDebugLogf( "[Amiga] GObj.Init: TransientPackage added to root." );
+#endif
 
+#ifdef PLATFORM_AMIGA
+	AmigaDebugLogf( "[Amiga] GObj.Init: registering autoregistered classes..." );
+	INT AmigaRegCount = 0;
+#endif
 	// Add all autoregistered classes.
 	UObject* Next;
 	for( UObject* Object=AutoRegister; Object!=NULL; Object=Next )
@@ -1139,7 +1174,13 @@ void FObjectManager::Init()
 			((UClass*)Object)->GetDefaultObject()->LoadConfig(NAME_Config);
 			((UClass*)Object)->GetDefaultObject()->LoadConfig(NAME_Localized);
 		}
+#ifdef PLATFORM_AMIGA
+		++AmigaRegCount;
+#endif
 	}
+#ifdef PLATFORM_AMIGA
+	AmigaDebugLogf( "[Amiga] GObj.Init: registered %d classes.", AmigaRegCount );
+#endif
 
 	// Allocate hardcoded objects.
 	AddToRoot( new UTextBufferFactory );
@@ -2661,6 +2702,19 @@ public:
 
 		// Tag all root objects' references.
 		*this << GObj.Root;
+#ifdef PLATFORM_AMIGA
+		{
+			int kept = 0, total = 0;
+			for( FObjectIterator It2; It2; ++It2 )
+			{
+				++total;
+				if( (It2->GetFlags()&KeepFlags) && (It2->GetFlags()&RF_TagGarbage) )
+					++kept;
+			}
+			AmigaDebugLogf( "[Amiga] TagUsed: KeepFlags=0x%08x total=%d kept-by-flag=%d Root.Num=%d",
+				(unsigned)KeepFlags, total, kept, GObj.Root.Num() );
+		}
+#endif
 		for( FObjectIterator It; It; ++It )
 		{
 			if( (It->GetFlags()&KeepFlags) && (It->GetFlags()&RF_TagGarbage) )
@@ -2677,8 +2731,22 @@ private:
 		guard(FArchiveTagUsed<<Obj);
 
 		guard(CheckValid);
+#ifdef PLATFORM_AMIGA
+		if( Obj && !Obj->IsValid() )
+		{
+			// Diagnostic: which object holds this bad reference, and what does
+			// the bad pointer look like? Skip it instead of asserting so we can
+			// see the full picture / how far the engine gets.
+			AmigaDebugLogf( "[Amiga] TagUsed: bad Obj=%p Context=%p (%s)",
+				(void*)Obj, (void*)Context,
+				(Context && Context->GetClass()) ? Context->GetClass()->GetName() : "?" );
+			Obj = NULL;
+			return *this;
+		}
+#else
 		if( Obj )
 			check(Obj->IsValid());
+#endif
 		unguard;
 
 		if( Obj && (Obj->GetFlags() & RF_Unreachable) )
@@ -2736,6 +2804,9 @@ void FObjectManager::PurgeGarbage( FOutputDevice* Out )
 
 	// Dispatch all Destroy messages.
 	guard(DispatchDestroys);
+#ifdef PLATFORM_AMIGA
+	AmigaDebugLogf( "[Amiga] PurgeGarbage DispatchDestroys: Objects.Num=%d at start", Objects.Num() );
+#endif
 	for( INT i=0; i<Objects.Num(); i++ )
 	{
 		guard(DispatchDestroy);
@@ -2757,12 +2828,15 @@ void FObjectManager::PurgeGarbage( FOutputDevice* Out )
 	// Purge all unreachable objects.
 	//warning: Can't use FObjectIterator here because classes may be destroyed before objects.
 	guard(DeleteGarbage);
+#ifdef PLATFORM_AMIGA
+	AmigaDebugLogf( "[Amiga] PurgeGarbage DeleteGarbage: Objects.Num=%d at start", Objects.Num() );
+#endif
 	for( INT i=0; i<Objects.Num(); i++ )
 	{
 		guard(DeleteObject);
 		if
 		(	Objects(i)
-		&&	(Objects(i)->GetFlags() & RF_Unreachable) 
+		&&	(Objects(i)->GetFlags() & RF_Unreachable)
 		&& !(Objects(i)->GetFlags() & RF_Intrinsic) )
 		{
 			delete Objects(i);

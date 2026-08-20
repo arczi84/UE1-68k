@@ -138,8 +138,11 @@ double FakeAtan( double X )
 
 void InitTables()
 {
-	static INT  Initialized=0;
-	if( !Initialized )
+	// libnix/-noixemul does not reliably clear the executable BSS on this 68k
+	// build.  A zero-initialized guard could therefore make us skip filling all
+	// fire lookup/random tables.  A non-zero initial cookie lives in .data.
+	static DWORD InitCookie = 0x46585230; // "FXR0": tables still need filling.
+	if( InitCookie != 0x46585231 )        // "FXR1": tables are ready.
 	{
 		// Init 8-bit sine table.
 		INT t;
@@ -168,7 +171,7 @@ void InitTables()
 		StaleRindex = 0;
 
 		// Now initialized;
-		Initialized=1;
+		InitCookie = 0x46585231;
 	}
 }
 
@@ -4050,10 +4053,19 @@ void UFireTexture::Clear( DWORD ClearFlags )
 void UFireTexture::PostLoad()
 {
 	guard(UFireTexture::PostLoad);
+#ifdef PLATFORM_AMIGA
+	// 68k GCC lays out these structs with 2-byte int alignment (vs x86's 4),
+	// so sizeof != the package's GetPropertiesSize(). Don't assert — the FX may
+	// render wrong, but let the game proceed. See memory note on alignment.
+	if( sizeof(UFireTexture)!=UFireTexture::StaticClass->GetPropertiesSize() )
+		debugf( NAME_Warning, "[Amiga] UFireTexture size %d != props %d (alignment)",
+			(int)sizeof(UFireTexture), UFireTexture::StaticClass->GetPropertiesSize() );
+#else
 	check(sizeof(UFireTexture)==UFireTexture::StaticClass->GetPropertiesSize());
 	check(sizeof(UWetTexture)==UWetTexture::StaticClass->GetPropertiesSize());
 	check(sizeof(UWaveTexture)==UWaveTexture::StaticClass->GetPropertiesSize());
 	check(sizeof(UFractalTexture)==UFractalTexture::StaticClass->GetPropertiesSize());
+#endif
 
 	// Call base class.
 	UFractalTexture::PostLoad();

@@ -3,6 +3,12 @@
 
 #include "NOpenGLDrvPrivate.h"
 
+#ifdef PLATFORM_AMIGA
+extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+// Keep this in .data: libnix/-noixemul does not clear the executable BSS.
+static INT GAmigaTextureTraceRemaining = 12;
+#endif
+
 /*-----------------------------------------------------------------------------
 	Global implementation.
 -----------------------------------------------------------------------------*/
@@ -49,6 +55,12 @@ void UNOpenGLRenderDevice::InternalClassInitializer( UClass* Class )
 
 UNOpenGLRenderDevice::UNOpenGLRenderDevice()
 {
+	for( INT Unit = 0; Unit < MaxTexUnits; ++Unit )
+	{
+		TexInfo[Unit].CurrentCacheID = 0;
+		TexInfo[Unit].UMult = TexInfo[Unit].VMult = 0.f;
+		TexInfo[Unit].UPan = TexInfo[Unit].VPan = 0.f;
+	}
 	NoFiltering = false;
 	UseHwPalette = true;
 	UseBGRA = true;
@@ -58,6 +70,17 @@ UNOpenGLRenderDevice::UNOpenGLRenderDevice()
 	UseWindowBrightness = true;
 	CurrentBrightness = -1.f;
 	SwapInterval = 1;
+#ifdef PLATFORM_AMIGA
+	// Use a conservative OpenGL 1.1 profile for the current single-TMU Amiga
+	// path.  Start with the base pass while the remaining UE state issues are
+	// diagnosed; users can raise quality after that path is stable.
+	NoFiltering = true;
+	UseHwPalette = false;
+	UseBGRA = false;
+	DetailTextures = false;
+	UseMultiTexture = false;
+	SwapInterval = 0;
+#endif
 }
 
 UBOOL UNOpenGLRenderDevice::Init( UViewport* InViewport )
@@ -105,6 +128,11 @@ UBOOL UNOpenGLRenderDevice::Init( UViewport* InViewport )
 	}
 
 	debugf( NAME_Log, "Got OpenGL %d.%d", GLVersion.major, GLVersion.minor );
+#ifdef PLATFORM_AMIGA
+	AmigaDebugLogf( "[Amiga] GL identity: vendor='%s' renderer='%s' version='%s'",
+		(const char*)glGetString( GL_VENDOR ), (const char*)glGetString( GL_RENDERER ),
+		(const char*)glGetString( GL_VERSION ) );
+#endif
 
 	ComposeSize = 256 * 256 * 4;
 	Compose = (BYTE*)appMalloc( ComposeSize, "GLComposeBuf" );
@@ -364,8 +392,13 @@ void UNOpenGLRenderDevice::DrawComplexSurfaceSingleTex( FSceneNode* Frame, FSurf
 		glEnd();
 	}
 
-	// Draw lightmap.
-	if( Surface.LightMap )
+	// Draw lightmap.  Temporarily keep AmigaMesa on the base-texture pass while
+	// diagnosing its legacy single-unit blend path.
+	if( Surface.LightMap
+#ifdef PLATFORM_AMIGA
+		&& false
+#endif
+	)
 	{
 		SetBlend( PF_Modulated );
 		if( Surface.PolyFlags & PF_Masked )
@@ -412,8 +445,12 @@ void UNOpenGLRenderDevice::DrawComplexSurfaceSingleTex( FSceneNode* Frame, FSurf
 			glDepthFunc( GL_LEQUAL );
 	}
 
-	// Draw fog.
-	if( Surface.FogMap )
+	// Draw fog (same single-pass Amiga fallback as lightmaps above).
+	if( Surface.FogMap
+#ifdef PLATFORM_AMIGA
+		&& false
+#endif
+	)
 	{
 		SetBlend( PF_Highlighted );
 		if( Surface.PolyFlags & PF_Masked )
@@ -488,6 +525,9 @@ void UNOpenGLRenderDevice::DrawTile( FSceneNode* Frame, FTextureInfo& Texture, F
 
 	SetSceneNode( Frame );
 	uclock(TileCycles);
+	const UBOOL IsCanvasOverlay = ( PolyFlags & PF_RenderHint ) != 0;
+	if( IsCanvasOverlay )
+		glDisable( GL_DEPTH_TEST );
 	SetBlend( PolyFlags );
 	SetTexture( 0, Texture, ( PolyFlags & PF_Masked ), 0.f );
 	ResetTexture( 1 );
@@ -509,6 +549,9 @@ void UNOpenGLRenderDevice::DrawTile( FSceneNode* Frame, FTextureInfo& Texture, F
 		glTexCoord2f( (U   )*TexInfo[0].UMult, (V+VL)*TexInfo[0].VMult );
 		glVertex3f( RFX2*Z*(X   -Frame->FX2), RFY2*Z*(Y+YL-Frame->FY2), Z );
 	glEnd();
+
+	if( IsCanvasOverlay )
+		glEnable( GL_DEPTH_TEST );
 
 	uunclock(TileCycles);
 	unguard;
@@ -724,10 +767,21 @@ void UNOpenGLRenderDevice::ResetTexture( INT TMU )
 {
 	guard(UNOpenGLRenderDevice::ResetTexture);
 
+	// With a single texture unit, TMU 1..3 are bookkeeping slots only.  Acting
+	// on them would disable GL_TEXTURE_2D on the actually active unit zero while
+	// leaving unit zero's cache entry intact, so later SetTexture(0) would skip
+	// the re-enable and all following geometry would be drawn untextured.
+	if( !UseMultiTexture && TMU != 0 )
+	{
+		TexInfo[TMU].CurrentCacheID = 0;
+		return;
+	}
+
 	if( TexInfo[TMU].CurrentCacheID != 0 )
 	{
 		uclock(BindCycles);
-		glActiveTexture( GL_TEXTURE0 + TMU );
+		if( UseMultiTexture )
+			glActiveTexture( GL_TEXTURE0 + TMU );
 		glBindTexture( GL_TEXTURE_2D, 0 );
 		glDisable( GL_TEXTURE_2D );
 		TexInfo[TMU].CurrentCacheID = 0;
@@ -771,7 +825,8 @@ void UNOpenGLRenderDevice::SetTexture( INT TMU, FTextureInfo& Info, DWORD PolyFl
 		TexAlloc.AddItem( Bind->Id );
 	}
 
-	glActiveTexture( GL_TEXTURE0 + TMU );
+	if( UseMultiTexture )
+		glActiveTexture( GL_TEXTURE0 + TMU );
 	glEnable( GL_TEXTURE_2D );
 	glBindTexture( GL_TEXTURE_2D, Bind->Id );
 	uunclock(BindCycles);
@@ -781,17 +836,32 @@ void UNOpenGLRenderDevice::SetTexture( INT TMU, FTextureInfo& Info, DWORD PolyFl
 		// New texture or it has changed, upload it.
 		Info.TextureFlags &= ~TF_RealtimeChanged;
 		UploadTexture( Info, ( PolyFlags & PF_Masked ), !OldBind );
-		// Set mip filtering if there are mips.
+		// Set mip filtering if there are mips.  AmigaMesa can treat UE1's
+		// deliberately shortened mip chains as incomplete and samples them white,
+		// so the Amiga upload path uses level zero and a non-mipmapped filter.
+#ifdef PLATFORM_AMIGA
+		const UBOOL HasMipmaps = false;
+#else
+		const UBOOL HasMipmaps = Info.NumMips > 1;
+#endif
 		if( ( PolyFlags & PF_NoSmooth ) || ( NoFiltering && Info.Palette ) ) // TODO: This is set per poly, not per texture.
 		{
-			glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, ( Info.NumMips > 1 ) ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST );
+			glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, HasMipmaps ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST );
 			glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
 		}
 		else
 		{
-			glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, ( Info.NumMips > 1 ) ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR );
+			glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, HasMipmaps ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR );
 			glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
 		}
+#ifdef PLATFORM_AMIGA
+		if( GAmigaTextureTraceRemaining > 0 )
+		{
+			const GLenum Error = glGetError();
+			AmigaDebugLogf( "[Amiga] GL texture params: cache=%08lx mips=%d error=0x%04lx",
+				(unsigned long)Info.CacheID, Info.NumMips, (unsigned long)Error );
+		}
+#endif
 	}
 
 	unguard;
@@ -920,9 +990,15 @@ void UNOpenGLRenderDevice::UploadTexture( FTextureInfo& Info, UBOOL Masked, UBOO
 		return;
 	}
 
-	// Upload all mips.
+	// Upload all mips on desktop.  Level zero is enough for the non-mipmapped
+	// Amiga fallback and avoids incomplete-texture behaviour in old AmigaMesa.
 	uclock(ImageCycles);
-	for( INT MipIndex = 0; MipIndex < Info.NumMips; ++MipIndex )
+#ifdef PLATFORM_AMIGA
+	const INT UploadMipCount = Min( Info.NumMips, 1 );
+#else
+	const INT UploadMipCount = Info.NumMips;
+#endif
+	for( INT MipIndex = 0; MipIndex < UploadMipCount; ++MipIndex )
 	{
 		const FMipmap* Mip = Info.Mips[MipIndex];
 		BYTE* UploadBuf;
@@ -935,11 +1011,22 @@ void UNOpenGLRenderDevice::UploadTexture( FTextureInfo& Info, UBOOL Masked, UBOO
 			ConvertTextureMipI8( Mip, Info.Palette, Masked, UploadBuf, UploadFormat, InternalFormat );
 		else
 			ConvertTextureMipBGRA7777( Mip, UploadBuf, UploadFormat, InternalFormat );
-		// Upload to GL.
+		// Upload to GL.  The known-good QuarkTex path in wipeout-mos also uses
+		// glTexSubImage2D for dynamic updates.
 		if( NewTexture )
 			glTexImage2D( GL_TEXTURE_2D, MipIndex, InternalFormat, Mip->USize, Mip->VSize, 0, UploadFormat, GL_UNSIGNED_BYTE, (void*)UploadBuf );
 		else
 			glTexSubImage2D( GL_TEXTURE_2D, MipIndex, 0, 0, Mip->USize, Mip->VSize, UploadFormat, GL_UNSIGNED_BYTE, (void*)UploadBuf );
+#ifdef PLATFORM_AMIGA
+		if( GAmigaTextureTraceRemaining > 0 )
+		{
+			const GLenum Error = glGetError();
+			AmigaDebugLogf( "[Amiga] GL texture upload: %dx%d pal=%d masked=%d rgba=%02x%02x%02x%02x error=0x%04lx",
+				Mip->USize, Mip->VSize, Info.Palette != NULL, Masked,
+				UploadBuf[0], UploadBuf[1], UploadBuf[2], UploadBuf[3], (unsigned long)Error );
+			--GAmigaTextureTraceRemaining;
+		}
+#endif
 	}
 	uunclock(ImageCycles);
 

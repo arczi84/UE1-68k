@@ -210,7 +210,7 @@ class ENGINE_API UBitmap : public UObject
 
 	// General bitmap information.
 	BYTE		Format;				// ETextureFormat.
-	UPalette*	Palette;			// Palette if 8-bit palettized.
+	UPalette*	Palette GCC_PACK(4);	// Palette if 8-bit palettized.
 	BYTE		UBits, VBits;		// # of bits in USize, i.e. 8 for 256.
 	INT			USize, VSize;		// Size, must be power of 2.
 	INT			UClamp, VClamp;		// Clamped width, must be <= size.

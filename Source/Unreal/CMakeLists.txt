@@ -6,6 +6,12 @@ else()
   set(SRC_FILES "Src/WinLaunch.cpp")
 endif()
 
+if(AMIGA)
+  # Large swapped stack for UE's deep recursion (see AmigaStack.c). Kept a .c
+  # file so exec/types.h doesn't collide with the engine's BYTE/WORD typedefs.
+  list(APPEND SRC_FILES "Src/AmigaStack.c")
+endif()
+
 if(VITA)
   set(VITA_APP_NAME "Unreal")
   set(VITA_TITLEID  "UNRL00001")
@@ -42,6 +48,29 @@ if(BUILD_STATIC)
   target_link_libraries(${PROJECT_NAME} -Wl,--whole-archive ${LINK_PACKAGES} -Wl,--no-whole-archive)
 else()
   target_link_libraries(${PROJECT_NAME} Engine Core)
+endif()
+
+if(AMIGA)
+  # Custom linker script: gathers C++ global constructors into a dense
+  # [__UE_CTOR_START, __UE_CTOR_END) array that main() runs itself, since
+  # libnix's crt never walks the constructor list. -T replaces the default
+  # script, so amiga68k.ld is a copy of it plus the CTOR bracketing.
+  target_link_options(${PROJECT_NAME} PRIVATE
+    "-T${CMAKE_SOURCE_DIR}/cmake/amiga68k.ld"
+    "-Wl,--wrap=AmigaMesaCreateContext")
+
+  # libSDL_libnix.a has built-in GL support (SDL_cgxgl) that references
+  # AmigaMesa*/gl* from libGL, and libGL in turn needs SDL's context glue, so
+  # the two archives are mutually dependent: wrap them in a link group so ld
+  # resolves across them in one pass. -ldebug supplies kprintf (referenced by
+  # libSDL_libnix).
+  target_link_libraries(${PROJECT_NAME}
+    "-L${AMIGA_SDK_ROOT}/lib"
+    -Wl,--start-group -lSDL_libnix -lGL -Wl,--end-group
+    -lpthread
+    -lm
+    -ldebug
+  )
 endif()
 
 if(VITA)

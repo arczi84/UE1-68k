@@ -129,18 +129,33 @@ typedef int16_t  SWORD;  // 16-bit signed.
 typedef int64_t  SQWORD; // 64-bit signed.
 
 // Other base types.
-typedef int32_t  UBOOL;  // Boolean 0 (false) or 1 (true).
+// NOTE: 32-bit base types use plain int/unsigned rather than int32_t/uint32_t.
+// On gcc 6.5 int32_t==int, but on gcc 15 int32_t==long, which makes INT!=int
+// and breaks every UE1 signature that mixes INT with int. int is 32-bit on
+// m68k either way, so this is a no-op for 6.5 and fixes the 15 build.
+// On 68k, GCC aligns int/float/long to only 2 bytes inside structs, but the
+// engine's property layout (and the x86/MSVC /Zp4 ABI the .u packages assume)
+// needs 4-byte alignment. Forcing aligned(4) on the base typedefs makes every
+// field of these types lay out at 4-byte boundaries like x86 — matching the
+// engine's computed property offsets — without -malign-int (which ICEs gcc6.5).
+#ifdef PLATFORM_AMIGA
+	#define UE_ALIGN4 __attribute__((aligned(4)))
+#else
+	#define UE_ALIGN4
+#endif
+
+typedef int      UBOOL UE_ALIGN4;  // Boolean 0 (false) or 1 (true).
 typedef double   DOUBLE; // 64-bit IEEE double.
 
 #ifndef PLATFORM_WIN32 // On Windows these are defined in minwindef.h.
 // Unsigned base types.
 typedef uint8_t  BYTE;   // 8-bit  unsigned.
-typedef uint32_t DWORD;  // 32-bit unsigned.
+typedef unsigned int DWORD UE_ALIGN4;  // 32-bit unsigned.
 // Signed base types.
-typedef int32_t  INT;    // 32-bit signed.
+typedef int      INT UE_ALIGN4;    // 32-bit signed.
 typedef int64_t __int64; // 64-bit signed.
 // Other base types.
-typedef float    FLOAT;  // 32-bit IEEE floating point.
+typedef float    FLOAT UE_ALIGN4;  // 32-bit IEEE floating point.
 #endif
 
 // If C++ exception handling is disabled, force guarding to be off.

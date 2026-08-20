@@ -4,6 +4,10 @@
 #include "NSDLDrv.h"
 #include "UnRender.h"
 
+#ifdef PLATFORM_AMIGA
+extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+#endif
+
 IMPLEMENT_CLASS( UNSDLClient );
 
 /*-----------------------------------------------------------------------------
@@ -68,6 +72,25 @@ void UNSDLClient::Init( UEngine* InEngine )
 	}
 
 	atexit( SDL_Quit );
+
+#ifdef PLATFORM_AMIGA
+	// AmigaMesa needs a large contiguous allocation while creating its
+	// context.  Do this immediately after SDL_Init, before UE loads the map
+	// and thousands of objects, then hand the implicit SDL 1.2 window to the
+	// viewport later.
+	SDL_GL_SetAttribute( SDL_GL_RED_SIZE, 8 );
+	SDL_GL_SetAttribute( SDL_GL_GREEN_SIZE, 8 );
+	SDL_GL_SetAttribute( SDL_GL_BLUE_SIZE, 8 );
+	SDL_GL_SetAttribute( SDL_GL_DOUBLEBUFFER, 1 );
+	const INT EarlyX = ViewportX > 0 ? ViewportX : 640;
+	const INT EarlyY = ViewportY > 0 ? ViewportY : 480;
+	AmigaDebugLogf( "[Amiga] Client: creating early GL window %dx%d", EarlyX, EarlyY );
+	SDL_Window* EarlyWindow = SDL_CreateWindow( "Unreal", SDL_WINDOWPOS_UNDEFINED,
+		SDL_WINDOWPOS_UNDEFINED, EarlyX, EarlyY, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN );
+	AmigaDebugLogf( "[Amiga] Client: early GL window=%p error='%s'", (void*)EarlyWindow, SDL_GetError() );
+	if( !EarlyWindow )
+		appErrorf( "Could not create early Amiga GL window: %s", SDL_GetError() );
+#endif
 
 	if( SDL_NumJoysticks() > 0 )
 		Controller = SDL_GameControllerOpen( 0 );

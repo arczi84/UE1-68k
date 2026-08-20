@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SYSTEM_DIR="${UNREAL_SYSTEM_DIR:-${ROOT_DIR}/Game/Unreal68k/System}"
+UNREAL_EXE="${1:-${SYSTEM_DIR}/Unreal_prof}"
+GMON_FILE="${2:-${SYSTEM_DIR}/gmon.out}"
+OUTPUT_DIR="${3:-${ROOT_DIR}/prof_logs}"
+HISTOGRAM_FILE="${UNREAL_HISTOGRAM_FILE:-${SYSTEM_DIR}/gprof-histogram.bin}"
+GPROF="/opt/amiga/bin/m68k-amigaos-gprof"
+
+for required in "${UNREAL_EXE}" "${GMON_FILE}" "${GPROF}"; do
+	if [[ ! -f "${required}" ]]; then
+		echo "Brak wymaganego pliku: ${required}" >&2
+		exit 1
+	fi
+done
+
+mkdir -p "${OUTPUT_DIR}"
+timestamp="$(date +'%Y%m%d_%H%M%S')"
+base="${OUTPUT_DIR}/unreal_amiga_${timestamp}"
+log_file="${base}.log"
+
+profile_input="${GMON_FILE}"
+patched_gmon=""
+if [[ -s "${HISTOGRAM_FILE}" ]]; then
+	patched_gmon="$(mktemp "${OUTPUT_DIR}/gmon.patched.XXXXXX")"
+	histogram_size="$(stat -c '%s' "${HISTOGRAM_FILE}")"
+	{
+		head -c 12 "${GMON_FILE}"
+		cat "${HISTOGRAM_FILE}"
+		tail -c "+$((13 + histogram_size))" "${GMON_FILE}"
+	} > "${patched_gmon}"
+	profile_input="${patched_gmon}"
+fi
+trap '[[ -z "${patched_gmon}" ]] || rm -f "${patched_gmon}"' EXIT
+
+"${GPROF}" -b -p -q -a "${UNREAL_EXE}" "${profile_input}" > "${log_file}"
+
+cp -f "${log_file}" "${ROOT_DIR}/analysis_unreal.log"
+
+# Sanity-check the time histogram.  A sampler that is not really sampling
+# produces all its hits in one or two buckets, which gprof then renders as a
+# plausible-looking report with 100% in a single function.  Catch that here
+# rather than in the report.
+if [[ -s "${HISTOGRAM_FILE}" ]]; then
+	python3 - "${HISTOGRAM_FILE}" <<'PY' || true
+import struct, sys
+d = open(sys.argv[1], 'rb').read()
+n = len(d) // 2
+v = struct.unpack('>%dH' % n, d[:n * 2])
+nz = [x for x in v if x]
+total = sum(v)
+print("Histogram: %d probek w %d kubelkach" % (total, len(nz)))
+if total == 0:
+    print("  UWAGA: zero probek - sampler nie zbieral danych.")
+elif len(nz) < 16:
+    print("  UWAGA: probki skupione w %d kubelkach - profil czasu"
+          " jest niewiarygodny." % len(nz))
+else:
+    print("  Rozklad wyglada sensownie (max kubelek = %.1f%% probek)."
+          % (100.0 * max(v) / total))
+PY
+fi
+
+if [[ -f "${SYSTEM_DIR}/gprof-sampler.log" ]]; then
+	echo -n "Sampler: "
+	cat "${SYSTEM_DIR}/gprof-sampler.log"
+fi
+
+echo "Profil tekstowy: ${log_file}"
+echo "Aktualny raport: ${ROOT_DIR}/analysis_unreal.log"

@@ -333,6 +333,8 @@ void UStruct::LinkOffsets( FArchive& Ar )
 	if( GetInheritanceSuper() )
 	{
 		Ar.Preload( GetInheritanceSuper() );
+		// UE_PROP_ALIGN clamps to the target's real max struct alignment (2 on
+		// 68k, 4 elsewhere) so computed layout matches the C++ struct layout.
 		PropertiesSize = Align(GetInheritanceSuper()->GetPropertiesSize(),4);
 	}
 	UProperty* Prev = NULL;

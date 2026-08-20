@@ -579,10 +579,10 @@ public:
     DWORD bSinglePlayer:1;
     DWORD bNet:1;
     DWORD bNetSpecial:1;
-    FLOAT OddsOfAppearing GCC_PACK(4);
-    BYTE DrawType;
-    BYTE Style;
-    class UTexture* Sprite;
+	    FLOAT OddsOfAppearing GCC_PACK(4);
+	    BYTE DrawType;
+	    BYTE Style;
+	    class UTexture* Sprite GCC_PACK(4);
     class UTexture* Texture;
     class UTexture* Skin;
     class UMesh* Mesh;

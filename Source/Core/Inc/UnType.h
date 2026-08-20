@@ -3,6 +3,19 @@
 	Copyright 1997 Epic MegaGames, Inc. This software is a trade secret.
 =============================================================================*/
 
+// Property field alignment. The engine lays out UObject native properties to
+// match the C++ struct layout of the corresponding class. On x86/MSVC that's
+// 4-byte alignment for int/float/pointer (sizeof), but 68k GCC aligns those to
+// only 2 bytes inside structs. If the two disagree, script<->C++ field offsets
+// mismatch (VERIFY_CLASS_OFFSET fails) and serialized data lands at wrong
+// offsets. Clamp property alignment to the target's real max struct alignment.
+#ifdef PLATFORM_AMIGA
+	// 68k: int/float/pointer align to 2 inside structs.
+	#define UE_PROP_ALIGN(n) ((n) > 2 ? 2 : (n))
+#else
+	#define UE_PROP_ALIGN(n) (n)
+#endif
+
 /*-----------------------------------------------------------------------------
 	UProperty.
 -----------------------------------------------------------------------------*/
@@ -206,7 +219,7 @@ class CORE_API UBoolProperty : public UProperty
 		}
 		else
 		{
-			Offset  = Align(GetParentStruct()->PropertiesSize,sizeof(DWORD));
+			Offset  = Align( GetParentStruct()->PropertiesSize, sizeof(DWORD) );
 			BitMask = FIRST_BITFIELD;
 		}
 	}

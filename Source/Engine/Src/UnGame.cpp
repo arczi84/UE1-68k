@@ -10,6 +10,10 @@
 #include "UnRender.h"
 #include "UnNet.h"
 
+#ifdef PLATFORM_AMIGA
+extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+#endif
+
 /*-----------------------------------------------------------------------------
 	Object class implementation.
 -----------------------------------------------------------------------------*/
@@ -485,16 +489,28 @@ ULevel* UGameEngine::LoadMap( const FURL& URL, UPendingLevel* Pending, char* Err
 				Guid = &Connection->Driver->Map(0).Guid;
 			}
 		}
+#ifdef PLATFORM_AMIGA
+		AmigaDebugLogf( "[Amiga] LoadMap: VERIFY loading '%s'...", PATH(*URL.Map) );
+#endif
 		LoadObject<ULevel>( MapParent, "MyLevel", PATH(*URL.Map), LOAD_Verify | LOAD_Throw | LOAD_KeepImports | LOAD_NoWarn, NULL );
+#ifdef PLATFORM_AMIGA
+		AmigaDebugLogf( "[Amiga] LoadMap: VERIFY done." );
+#endif
 	}
 	catch( char* Error )
 	{
 		// Safely failed loading.
+#ifdef PLATFORM_AMIGA
+		AmigaDebugLogf( "[Amiga] LoadMap: VERIFY threw: %s", Error );
+#endif
 		appStrcpy( Error256, Error );
 		SetProgress( "Failed To Load Map", Error, 6.0 );
 		return NULL;
 	}
 	unguard;
+#ifdef PLATFORM_AMIGA
+	AmigaDebugLogf( "[Amiga] LoadMap: past verify, into cleanup/dissociate..." );
+#endif
 
 	// Dissociate Viewport actors.
 	guard(DissociateViewports);
@@ -544,7 +560,13 @@ ULevel* UGameEngine::LoadMap( const FURL& URL, UPendingLevel* Pending, char* Err
 	guard(LoadLevel);
 	if( MapParent && Guid )
 		GObj.GetPackageLinker( MapParent, NULL, LOAD_Verify | LOAD_Throw | LOAD_KeepImports | LOAD_NoWarn, NULL, Guid );
+#ifdef PLATFORM_AMIGA
+	AmigaDebugLogf( "[Amiga] LoadMap: loading level object '%s'...", PATH(*URL.Map) );
+#endif
 	GLevel = LoadObject<ULevel>( MapParent, "MyLevel", PATH(*URL.Map), LOAD_KeepImports | LOAD_NoFail, NULL );
+#ifdef PLATFORM_AMIGA
+	AmigaDebugLogf( "[Amiga] LoadMap: level object = %p", (void*)GLevel );
+#endif
 	check(!GLevel->NetDriver);
 	unguard;
 
@@ -845,6 +867,9 @@ ULevel* UGameEngine::LoadMap( const FURL& URL, UPendingLevel* Pending, char* Err
 	unguard;
 
 	// Successfully started local level.
+#ifdef PLATFORM_AMIGA
+	AmigaDebugLogf( "[Amiga] LoadMap: SUCCESS, returning GLevel=%p", (void*)GLevel );
+#endif
 	return GLevel;
 	unguard;
 }

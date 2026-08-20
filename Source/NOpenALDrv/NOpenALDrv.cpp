@@ -80,7 +80,10 @@ UBOOL UNOpenALAudioSubsystem::Init()
 
 	const ALint AttrList[] = {
 		ALC_FREQUENCY, OutputRate,
+#ifdef ALC_SOFT_HRTF
+		// HRTF is an OpenAL-Soft extension; the Amiga OpenAL lacks it.
 		ALC_SOFT_HRTF, UseHRTF,
+#endif
 		0
 	};
 

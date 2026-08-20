@@ -459,6 +459,12 @@ public:
 	// Accessors.
 	virtual UBOOL GetInitialized() {return Initialized;}
 	virtual UPackage* GetTransientPackage() {return TransientPackage;}
+#ifdef PLATFORM_AMIGA
+	// See AmigaResetAutoRegister in UnObj.cpp — resets the autoreg list head
+	// that libnix leaves as BSS garbage. Static so the launcher can call it
+	// before the object system exists.
+	static void AmigaResetAutoRegister() { AutoRegister = NULL; }
+#endif
 	FName GetTempState() {return TempState;}//oldver
 	FName GetTempGroup() {return TempGroup;}//oldver
 	INT GetTempNum() {return TempNum;}//oldver

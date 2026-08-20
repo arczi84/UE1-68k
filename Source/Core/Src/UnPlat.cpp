@@ -53,6 +53,10 @@
 
 #include "Core.h"
 
+#ifdef PLATFORM_AMIGA
+extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+#endif
+
 #ifndef MAX_COMPUTERNAME_LENGTH
 #define MAX_COMPUTERNAME_LENGTH 256
 #endif
@@ -196,7 +200,9 @@ CORE_API void appRequestExit()
 #elif defined(PLATFORM_SDL)
 	SDL_Event Ev;
 	Ev.type = SDL_QUIT;
-	Ev.quit.timestamp = SDL_GetTicks();
+#ifndef PLATFORM_AMIGA
+	Ev.quit.timestamp = SDL_GetTicks(); // SDL 1.2 events have no timestamp.
+#endif
 	SDL_PushEvent( &Ev );
 #endif
 	GIsRequestingExit=1;
@@ -477,10 +483,22 @@ void appInit()
 	debugf( NAME_Init, "Detected: %s", SDL_GetPlatform() );
 
 	// CPU speed.
+#ifdef PLATFORM_AMIGA
+	// SDL 1.2 exposes a native 32-bit millisecond clock.  Avoid routing it
+	// through Uint64 and the 68k soft-float conversion helpers: those are both
+	// unnecessarily expensive and have produced incorrect frame deltas with
+	// this libnix toolchain.
+	DOUBLE Frequency = 1000.0;
+#else
 	DOUBLE Frequency = SDL_GetPerformanceFrequency();
+#endif
 	check(Frequency!=0.0);
 	GSecondsPerCycle = 1.0 / Frequency;
+#ifdef PLATFORM_AMIGA
+	debugf( NAME_Init, "CPU Timer Freq=%i Hz", 1000 );
+#else
 	debugf( NAME_Init, "CPU Timer Freq=%f Hz", (FLOAT)Frequency );
+#endif
 
 	// Get CPU info.
 	GPageSize = 4096; // TODO: sysconf?
@@ -609,7 +627,8 @@ CORE_API void* appGetDllHandle( const char* Filename )
 	if( (Cur = appStrchr( Test, '.' )) != NULL )
 		*Cur = '\0';
 
-	return appGetStaticExport( Test );
+	void* Result = appGetStaticExport( Test );
+	return Result;
 
 	unguard;
 }
@@ -748,6 +767,8 @@ CORE_API DOUBLE appSeconds()
 	static LARGE_INTEGER ret;
 	QueryPerformanceCounter(&ret);
 	return (DOUBLE)ret.QuadPart * GSecondsPerCycle;
+#elif defined(PLATFORM_AMIGA)
+	return (DOUBLE)SDL_GetTicks() * 0.001;
 #elif defined(PLATFORM_SDL)
 	return (DOUBLE)SDL_GetPerformanceCounter() * GSecondsPerCycle;
 #else
@@ -761,6 +782,8 @@ CORE_API DWORD appCycles()
 	static LARGE_INTEGER ret;
 	QueryPerformanceCounter(&ret);
 	return ret.LowPart;
+#elif defined(PLATFORM_AMIGA)
+	return SDL_GetTicks();
 #elif defined(PLATFORM_SDL)
 	return SDL_GetPerformanceCounter();
 #else

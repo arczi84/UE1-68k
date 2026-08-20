@@ -29,6 +29,26 @@ if(VITA)
   set(BUILD_STATIC ON)
 endif()
 
+if(AMIGA)
+  # AmigaOS 3.x has no dlopen-style module loading, so everything is linked
+  # into one executable. libGL.a is fixed-function only: use NOpenGLDrv, not
+  # the shader-based GLES driver.
+  set(BUILD_STATIC ON)
+  set(BUILD_EDITOR OFF)
+  set(BUILD_SOFTDRV OFF)
+  set(BUILD_WINDRV OFF)
+  set(BUILD_NOPENGLDRV ON)
+  set(BUILD_NOPENGLESDRV OFF)
+  set(BUILD_NOPENALDRV OFF)
+  set(BUILD_NULLSOUNDDRV ON)
+  # IpDrv (multiplayer) needs AmiTCP socket headers, whose <exec/types.h>
+  # types clash with the engine's in the same TU. Off until that's isolated;
+  # single-player does not need it.
+  option(BUILD_IPDRV "Build IpDrv (networking)" OFF)
+else()
+  option(BUILD_IPDRV "Build IpDrv (networking)" ON)
+endif()
+
 if(BUILD_STATIC)
   if(MSVC)
     message(FATAL_ERROR "Static mode is not supported with MSVC")
@@ -50,7 +70,11 @@ set(TARGET_IS_ARM FALSE)
 set(TARGET_IS_64BIT FALSE)
 set(TARGET_IS_BIG_ENDIAN FALSE)
 
-if(TARGET_ARCH MATCHES "arm")
+if(AMIGA)
+  # TargetArch can't probe a hunk-format cross compiler; set it directly.
+  set(TARGET_ARCH "m68k")
+  set(TARGET_IS_BIG_ENDIAN TRUE)
+elseif(TARGET_ARCH MATCHES "arm")
   set(TARGET_IS_ARM TRUE)
   if(TARGET_ARCH MATCHES "64")
     # arm64/aarch64
@@ -81,6 +105,7 @@ if(TARGET_IS_64BIT)
     set(TARGET_IS_64BIT FALSE)
     set(TARGET_ARCH "x86")
     add_compile_options(-m32)
+    add_link_options(-m32)  # linker also needs -m32 or shared libs link as x86-64
   else()
     message(FATAL_ERROR "64-bit platforms are currently not supported. If you're building on Windows with MSVC, try -A Win32.")
   endif()
@@ -107,7 +132,13 @@ else()
   add_definitions(-DPLATFORM_32BIT)
 endif()
 
-if(TARGET_IS_X86)
+if(AMIGA)
+  add_definitions(-DPLATFORM_M68K)
+  # The engine requires signed char (static_assert in UnGcc.h), which is the
+  # 68k default. -fno-short-enums keeps enum sizes matching the x86 build.
+  add_compile_options(-fno-short-enums)
+  add_link_options(-fno-short-enums)
+elseif(TARGET_IS_X86)
   add_definitions(-DPLATFORM_X86)
 elseif(TARGET_IS_ARM)
   add_definitions(-DPLATFORM_ARM)
@@ -132,7 +163,12 @@ if(TARGET_IS_WINDOWS)
 else()
   # TODO
   add_definitions(-DPLATFORM_POSIX)
-  if(VITA)
+  if(AMIGA)
+    # AmigaOS filesystems are case-insensitive, so PLATFORM_CASE_SENSITIVE_FS
+    # stays off (which also avoids strcasestr, absent from this libc).
+    add_definitions(-DPLATFORM_AMIGA)
+    set(CMAKE_EXECUTABLE_SUFFIX "")
+  elseif(VITA)
     add_definitions(-DPLATFORM_PSVITA)
   else()
     add_definitions(-DPLATFORM_CASE_SENSITIVE_FS)
@@ -169,7 +205,24 @@ endif()
 # Dependencies
 
 if(USE_SDL)
-  if(MSVC)
+  if(AMIGA)
+    # SDL 1.2 only. Core/Inc/Amiga holds a SDL2/SDL.h that redirects to the
+    # SDL12Compat shim, and must come first on the include path so the
+    # engine's #include "SDL2/SDL.h" resolves to it.
+    if(NOT DEFINED SDL2_INCLUDE_DIR)
+      set(SDL2_INCLUDE_DIR
+        "${CMAKE_SOURCE_DIR}/Core/Inc/Amiga"
+        "${CMAKE_SOURCE_DIR}/Core/Inc"
+        "${AMIGA_TOOLCHAIN_ROOT}/include/SDL")
+    endif()
+    if(NOT DEFINED SDL2_LIBRARY)
+      # Static engine libraries only need the SDL headers.  The final Unreal
+      # executable links SDL together with libGL in one ordered group; adding
+      # it as a transitive dependency here puts the same archive several times
+      # into the final link and differs from known-good Amiga SDL/GL programs.
+      set(SDL2_LIBRARY "")
+    endif()
+  elseif(MSVC)
     if(NOT DEFINED SDL2_INCLUDE_DIR)
       set(SDL2_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/../Thirdparty/SDL2/include")
     endif()
@@ -220,14 +273,17 @@ endif()
 
 # Subprojects
 
-set(INSTALL_TARGETS Core Engine Render IpDrv Fire Unreal)
+set(INSTALL_TARGETS Core Engine Render Fire Unreal)
 
 set(CMAKE_SHARED_LIBRARY_PREFIX "")
 
 add_subdirectory(Core)
 add_subdirectory(Engine)
 add_subdirectory(Render)
-add_subdirectory(IpDrv)
+if(BUILD_IPDRV)
+  add_subdirectory(IpDrv)
+  list(APPEND INSTALL_TARGETS IpDrv)
+endif()
 add_subdirectory(Fire)
 
 if(USE_SDL)

@@ -18,6 +18,11 @@ target_include_directories(${PROJECT_NAME}
 
 target_link_libraries(${PROJECT_NAME} ${SDL2_LIBRARY})
 
+if(AMIGA)
+  # Amiga Mesa fixed-function GL (matches wipeout-mos GL_LEGACY).
+  target_link_libraries(${PROJECT_NAME} "-L${AMIGA_SDK_ROOT}/lib" "-lGL")
+endif()
+
 target_link_libraries(${PROJECT_NAME} Render Engine Core)
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE NOPENGLDRV_EXPORTS UPACKAGE_NAME=${PROJECT_NAME})

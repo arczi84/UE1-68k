@@ -75,6 +75,12 @@ private:
 	SDL_Rect DisplaySize;
 	SWORD JoyAxis[SDL_CONTROLLER_AXIS_MAX];
 	UBOOL QuitRequested;
+#ifdef PLATFORM_AMIGA
+	// SDL 1.2 has no true relative mouse mode: the emulated cursor still stops
+	// at the window edge, capping how far the player can turn. We recenter the
+	// cursor after each motion event and ignore the warp-generated event.
+	UBOOL IgnoreNextWarp;
+#endif
 	FLOAT InputUpdateTime;
 
 	// Info saved during captures and fullscreen sessions.

@@ -4,6 +4,13 @@
 #include "NSDLDrv.h"
 #include "UnRender.h"
 
+#ifdef PLATFORM_AMIGA
+extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+#define AMIGA_VIEW_LOG(...) AmigaDebugLogf( "[Amiga] Viewport: " __VA_ARGS__ )
+#else
+#define AMIGA_VIEW_LOG(...)
+#endif
+
 IMPLEMENT_CLASS( UNSDLViewport );
 
 /*-----------------------------------------------------------------------------
@@ -96,7 +103,7 @@ const FLOAT UNSDLViewport::JoyAxisDefaultScale[SDL_CONTROLLER_AXIS_MAX] =
 //
 // SDL_Scancode -> EInputKey translation map.
 //
-BYTE UNSDLViewport::KeyMap[512];
+BYTE UNSDLViewport::KeyMap[SDL_NUM_SCANCODES];
 void UNSDLViewport::InitKeyMap()
 {
 	#define INIT_KEY_RANGE( AStart, AEnd, BStart, BEnd ) \
@@ -191,6 +198,9 @@ UNSDLViewport::UNSDLViewport( ULevel* InLevel, UNSDLClient* InClient )
 
 	Destroyed = false;
 	QuitRequested = false;
+#ifdef PLATFORM_AMIGA
+	IgnoreNextWarp = false;
+#endif
 
 	unguard;
 }
@@ -261,6 +271,7 @@ void UNSDLViewport::UpdateWindow()
 void UNSDLViewport::OpenWindow( void* InParentWindow, UBOOL Temporary, INT NewX, INT NewY, INT OpenX, INT OpenY )
 {
 	guard(UNSDLViewport::OpenWindow);
+	AMIGA_VIEW_LOG( "OpenWindow enter temp=%d size=%dx%d pos=%d,%d", Temporary, NewX, NewY, OpenX, OpenY );
 	check(Actor);
 	check(!OnHold);
 	UBOOL DoRepaint=0, DoSetActive=0;
@@ -326,6 +337,15 @@ void UNSDLViewport::OpenWindow( void* InParentWindow, UBOOL Temporary, INT NewX,
 		// Set OpenGL attributes if needed.
 		if( DoOpenGL )
 		{
+#ifdef PLATFORM_AMIGA
+			// Amiga SDL 1.2 creates the implicit GL context in
+			// SDL_SetVideoMode.  Give AmigaMesa a complete, conservative
+			// framebuffer request before that call.
+			SDL_GL_SetAttribute( SDL_GL_RED_SIZE, 8 );
+			SDL_GL_SetAttribute( SDL_GL_GREEN_SIZE, 8 );
+			SDL_GL_SetAttribute( SDL_GL_BLUE_SIZE, 8 );
+			SDL_GL_SetAttribute( SDL_GL_DOUBLEBUFFER, 1 );
+#else
 			if( GLProfile == SDL_GL_CONTEXT_PROFILE_ES )
 			{
 				// Request GLES2.
@@ -333,6 +353,7 @@ void UNSDLViewport::OpenWindow( void* InParentWindow, UBOOL Temporary, INT NewX,
 				SDL_GL_SetAttribute( SDL_GL_CONTEXT_MINOR_VERSION, 0 );
 			}
 			SDL_GL_SetAttribute( SDL_GL_CONTEXT_PROFILE_MASK, GLProfile );
+#endif
 		}
 
 		// Set position and size.
@@ -348,10 +369,12 @@ void UNSDLViewport::OpenWindow( void* InParentWindow, UBOOL Temporary, INT NewX,
 		}
 
 		// Create or update the window.
-		if( !hWnd )
-		{
-			// Creating new viewport.
-			hWnd = SDL_CreateWindow( "", OpenX, OpenY, NewX, NewY, Flags );
+			if( !hWnd )
+			{
+				// Creating new viewport.
+				AMIGA_VIEW_LOG( "before SDL_CreateWindow flags=0x%08x gl=%d", (unsigned)Flags, DoOpenGL );
+				hWnd = SDL_CreateWindow( "", OpenX, OpenY, NewX, NewY, Flags );
+				AMIGA_VIEW_LOG( "after SDL_CreateWindow hwnd=%p error='%s'", (void*)hWnd, SDL_GetError() );
 			if( !hWnd && DoOpenGL )
 			{
 				// Try without GL.
@@ -381,17 +404,21 @@ void UNSDLViewport::OpenWindow( void* InParentWindow, UBOOL Temporary, INT NewX,
 		}
 
 		// Create GL context or SDL renderer if needed.
-		if( DoOpenGL )
-		{
-			if( !GLCtx )
+			if( DoOpenGL )
 			{
-				GLCtx = SDL_GL_CreateContext( hWnd );
+				if( !GLCtx )
+				{
+					AMIGA_VIEW_LOG( "before SDL_GL_CreateContext" );
+					GLCtx = SDL_GL_CreateContext( hWnd );
+					AMIGA_VIEW_LOG( "after SDL_GL_CreateContext ctx=%p", GLCtx );
 				if( !GLCtx )
 				{
 					appErrorf( "Could not create GL context: %s", SDL_GetError() );
 				}
 			}
-			SDL_GL_MakeCurrent( hWnd, GLCtx );
+				AMIGA_VIEW_LOG( "before SDL_GL_MakeCurrent" );
+				SDL_GL_MakeCurrent( hWnd, GLCtx );
+				AMIGA_VIEW_LOG( "after SDL_GL_MakeCurrent" );
 		}
 		else
 		{
@@ -418,7 +445,9 @@ void UNSDLViewport::OpenWindow( void* InParentWindow, UBOOL Temporary, INT NewX,
 			}
 		}
 
-		SDL_ShowWindow( hWnd );
+			AMIGA_VIEW_LOG( "before SDL_ShowWindow" );
+			SDL_ShowWindow( hWnd );
+			AMIGA_VIEW_LOG( "after SDL_ShowWindow" );
 
 		// Get this window's display parameters.
 		SDL_DisplayMode DisplayMode;
@@ -433,18 +462,24 @@ void UNSDLViewport::OpenWindow( void* InParentWindow, UBOOL Temporary, INT NewX,
 	SizeX = NewX;
 	SizeY = NewY;
 
+	AMIGA_VIEW_LOG( "before TryRenderDevice current=%p", (void*)RenDev );
 	if( !RenDev && Temporary )
 		Client->TryRenderDevice( this, "SoftDrv.SoftwareRenderDevice", 0 );
 	if( !RenDev && !GIsEditor && !NoHard )
 		Client->TryRenderDevice( this, "ini:Engine.Engine.GameRenderDevice", Client->StartupFullscreen );
 	if( !RenDev )
 		Client->TryRenderDevice( this, "ini:Engine.Engine.WindowedRenderDevice", 0 );
+	AMIGA_VIEW_LOG( "after TryRenderDevice rendev=%p", (void*)RenDev );
 	check(RenDev);
 
 	if( !Temporary )
 		UpdateWindow();
 	if( DoRepaint )
+	{
+		AMIGA_VIEW_LOG( "before first Repaint" );
 		Repaint();
+		AMIGA_VIEW_LOG( "after first Repaint" );
+	}
 
 	unguard;
 }
@@ -717,6 +752,16 @@ void UNSDLViewport::SetMouseCapture( UBOOL Capture, UBOOL Clip, UBOOL OnlyFocus 
 
 	// Handle capturing.
 	SDL_SetRelativeMouseMode( (SDL_bool)Capture );
+#ifdef PLATFORM_AMIGA
+	// Center the cursor now so the first captured motion delta is measured from
+	// the middle, and clear any pending warp-skip left over from a prior grab.
+	IgnoreNextWarp = false;
+	if( Capture && SizeX && SizeY )
+	{
+		IgnoreNextWarp = true;
+		SDL_WarpMouse( SizeX / 2, SizeY / 2 );
+	}
+#endif
 
 	unguard;
 }
@@ -751,6 +796,7 @@ UBOOL UNSDLViewport::TickInput()
 				// signal to client and remember set a flag just in case
 				QuitRequested = true;
 				return true;
+#ifndef PLATFORM_AMIGA
 			case SDL_TEXTINPUT:
 				for( const char *p = Ev.text.text; *p && p < Ev.text.text + sizeof( Ev.text.text ); ++p )
 				{
@@ -760,19 +806,39 @@ UBOOL UNSDLViewport::TickInput()
 						Client->Engine->Key( this, (EInputKey)*p );
 				}
 				break;
+#endif
 			case SDL_KEYDOWN:
 				if( Ev.key.keysym.sym == SDLK_RETURN && (Ev.key.keysym.mod & KMOD_ALT) )
 				{
 					Exec("ToggleFullscreen", this);
 					break;
 				}
+#ifdef PLATFORM_AMIGA
+				// SDL 1.2 has no SDL_TEXTINPUT; deliver printable characters
+				// from the key event's unicode field instead.
+				if( Ev.type == SDL_KEYDOWN && Ev.key.keysym.unicode )
+				{
+					Uint16 U = Ev.key.keysym.unicode;
+					if( U < 128 && ( isprint( U ) || U == '\r' ) )
+						Client->Engine->Key( this, (EInputKey)U );
+				}
+#endif
 			case SDL_KEYUP:
+#ifdef PLATFORM_AMIGA
+				// SDL 1.2's scancode is the platform-specific raw key code, while
+				// InitKeyMap() above is deliberately indexed by SDLKey/SDLK_*.
+				// Using scancode made Escape and most gameplay keys become unrelated
+				// Unreal keys on Amiga.
+				CauseInputEvent( KeyMap[Ev.key.keysym.sym], ( Ev.type == SDL_KEYDOWN ) ? IST_Press : IST_Release );
+#else
 				CauseInputEvent( KeyMap[Ev.key.keysym.scancode], ( Ev.type == SDL_KEYDOWN ) ? IST_Press : IST_Release );
+#endif
 				break;
 			case SDL_MOUSEBUTTONDOWN:
 			case SDL_MOUSEBUTTONUP:
 				CauseInputEvent( MouseButtonMap[Ev.button.button], ( Ev.type == SDL_MOUSEBUTTONDOWN ) ? IST_Press : IST_Release );
 				break;
+#ifndef PLATFORM_AMIGA
 			case SDL_MOUSEWHEEL:
 				if( Ev.wheel.y )
 				{
@@ -828,6 +894,7 @@ UBOOL UNSDLViewport::TickInput()
 					JoyAxis[Ev.caxis.axis] = NewValue;
 				}
 				break;
+#endif // !PLATFORM_AMIGA (SDL 1.2 has no wheel/gamecontroller events)
 			case SDL_MOUSEMOTION:
 				if( !Client->FullscreenViewport && !SDL_GetRelativeMouseMode() )
 				{
@@ -836,6 +903,15 @@ UBOOL UNSDLViewport::TickInput()
 				}
 				else
 				{
+#ifdef PLATFORM_AMIGA
+					// Drop the synthetic motion produced by our own recenter warp,
+					// otherwise it would cancel out the player's turn.
+					if( IgnoreNextWarp )
+					{
+						IgnoreNextWarp = false;
+						break;
+					}
+#endif
 					DWORD ViewportButtonFlags = 0;
 					if( Ev.motion.state & SDL_BUTTON_LMASK ) ViewportButtonFlags |= MOUSE_Left;
 					if( Ev.motion.state & SDL_BUTTON_RMASK ) ViewportButtonFlags |= MOUSE_Right;
@@ -846,6 +922,21 @@ UBOOL UNSDLViewport::TickInput()
 						if( Ev.motion.xrel ) CauseInputEvent( IK_MouseX, IST_Axis, Ev.motion.xrel );
 						if( Ev.motion.yrel ) CauseInputEvent( IK_MouseY, IST_Axis, -Ev.motion.yrel );
 					}
+#ifdef PLATFORM_AMIGA
+					// SDL 1.2's grabbed cursor stops at the window edge, so the raw
+					// deltas cap out. Warp the cursor back to the center after every
+					// motion so there is always room to keep turning.
+					if( SizeX && SizeY )
+					{
+						const INT CenterX = SizeX / 2;
+						const INT CenterY = SizeY / 2;
+						if( Ev.motion.x != CenterX || Ev.motion.y != CenterY )
+						{
+							IgnoreNextWarp = true;
+							SDL_WarpMouse( CenterX, CenterY );
+						}
+					}
+#endif
 				}
 				break;
 			default:

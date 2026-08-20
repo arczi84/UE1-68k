@@ -18,6 +18,15 @@ Revision history:
 
 CORE_API void (UObject::*GIntrinsics[EX_Max])( FFrame &Stack, BYTE *&Result );
 CORE_API int GIntrinsicDuplicate=0;
+static int GIntrinsicsInitialized=0;
+
+#ifdef PLATFORM_AMIGA
+extern "C" void AmigaResetIntrinsicRegistry()
+{
+	GIntrinsicDuplicate = 0;
+	GIntrinsicsInitialized = 0;
+}
+#endif
 
 #if DO_SLOW_GUARD
 	static int Runaway=0;
@@ -2728,10 +2737,9 @@ AUTOREGISTER_INTRINSIC( UObject, EX_Iterator, execIterator );
 //
 BYTE CORE_API GRegisterIntrinsic( int iIntrinsic, void* Func )
 {
-	static int Initialized = 0;
-	if( !Initialized )
+	if( !GIntrinsicsInitialized )
 	{
-		Initialized = 1;
+		GIntrinsicsInitialized = 1;
 		for( int i=0; i<ARRAY_COUNT(GIntrinsics); i++ )
 			GIntrinsics[i] = &UObject::execUndefined;
 	}

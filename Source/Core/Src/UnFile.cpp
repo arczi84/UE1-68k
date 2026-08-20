@@ -541,8 +541,57 @@ CORE_API TArray<FString> appFindFiles( const char* Spec )
 //
 // Standard file functions.
 //
+#ifdef PLATFORM_AMIGA
+// Translate a Unix-style relative path to AmigaDOS syntax:
+//   "../Maps/Entry.unr" -> "/Maps/Entry.unr"   ("/" means parent on Amiga)
+//   "./System/x"        -> "System/x"
+//   leading "/" stays (already parent), absolute "Vol:" paths pass through.
+// The engine builds paths like "..\Maps\..." (backslash) and "../Maps/..."; we
+// also normalize backslashes to '/'. AmigaDOS filesystems accept '/' as the
+// separator, so only the ".." segments need rewriting.
+static const char* AmigaTranslatePath( const char* Path, char* Out, int OutSize )
+{
+	// Absolute AmigaDOS path (contains a volume ':') — leave as-is.
+	if( strchr( Path, ':' ) )
+		return Path;
+
+	char Norm[1024];
+	int n = 0;
+	for( const char* p = Path; *p && n < (int)sizeof(Norm)-1; ++p )
+		Norm[n++] = (*p == '\\') ? '/' : *p;
+	Norm[n] = 0;
+
+	int o = 0;
+	const char* p = Norm;
+	while( *p && o < OutSize-1 )
+	{
+		if( p[0]=='.' && p[1]=='.' && (p[2]=='/'||p[2]==0) )
+		{
+			// "../" -> "/"
+			Out[o++] = '/';
+			p += (p[2]=='/') ? 3 : 2;
+		}
+		else if( p[0]=='.' && p[1]=='/' )
+		{
+			// "./" -> ""
+			p += 2;
+		}
+		else
+		{
+			Out[o++] = *p++;
+		}
+	}
+	Out[o] = 0;
+	return Out;
+}
+#endif
+
 CORE_API FILE* appFopen( const char* Path, const char* Mode )
 {
+#ifdef PLATFORM_AMIGA
+	char AmigaPath[1024];
+	Path = AmigaTranslatePath( Path, AmigaPath, sizeof(AmigaPath) );
+#endif
 	FILE* F = fopen( Path, Mode );
 
 #ifdef PLATFORM_CASE_SENSITIVE_FS

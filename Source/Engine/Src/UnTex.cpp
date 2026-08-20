@@ -63,7 +63,12 @@ void UTexture::Update( DOUBLE CurrentTime )
 	{
 		if( TextureFlags & TF_Realtime )
 			TextureFlags |= TF_RealtimeChanged;
+#ifdef PLATFORM_AMIGA
+		extern FLOAT GAmigaFrameDeltaSeconds;
+		Tick( GAmigaFrameDeltaSeconds );
+#else
 		Tick( CurrentTime - LastUpdateTime);
+#endif
 		LastUpdateTime = CurrentTime;
 	}
 
