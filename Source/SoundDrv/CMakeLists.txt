@@ -11,8 +11,17 @@ target_include_directories(${PROJECT_NAME}
   ${CMAKE_CURRENT_SOURCE_DIR}/Inc
   PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/Src
+  ${SDL2_INCLUDE_DIR}
+  ${AMIGA_SDK_ROOT}/include/SDL
+  ${AMIGA_SDK_ROOT}/include
 )
 
 target_link_libraries(${PROJECT_NAME} Engine Core)
+
+if(AMIGA)
+  target_link_libraries(${PROJECT_NAME}
+    "${AMIGA_SDK_ROOT}/lib/libSDL_mixer.a"
+    "${AMIGA_SDK_ROOT}/lib/libmodplug.a")
+endif()
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE SOUNDDRV_EXPORTS UPACKAGE_NAME=${PROJECT_NAME})

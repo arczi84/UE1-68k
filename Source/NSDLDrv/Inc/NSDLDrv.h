@@ -52,6 +52,9 @@ class NSDLDRV_API UNSDLViewport : public UViewport
 	void SetClientSize( INT NewX, INT NewY, UBOOL UpdateProfile );
 	void EndFullscreen();
 	UBOOL TickInput(); // returns true if the viewport has requested death
+#ifdef AMIGA_USE_NATIVE_MINIGL
+	void RecreateNativeMiniGL( INT NewX, INT NewY, UBOOL Fullscreen );
+#endif
 
 private:
 	// Static variables.
@@ -70,6 +73,9 @@ private:
 	SDL_Texture* SDLTex; // for use with the above renderer
 	DWORD SDLTexFormat;
 	SDL_GLContext GLCtx; // for OpenGLDrv
+	UBOOL NativeMiniGL;
+	UBOOL NativeMiniGLFullscreen;
+	UBOOL MouseCaptured;
 	UBOOL Destroyed;
 	INT DisplayIndex;
 	SDL_Rect DisplaySize;

@@ -8,6 +8,11 @@
 
 #include "RenderPrivate.h"
 
+#ifdef PLATFORM_AMIGA
+extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+extern INT GAmigaStartupTraceFrames;
+#endif
+
 /*-----------------------------------------------------------------------------
 	Globals.
 -----------------------------------------------------------------------------*/
@@ -2294,6 +2299,10 @@ void URender::DrawFrame( FSceneNode* Frame )
 void URender::DrawWorld( FSceneNode* Frame )
 {
 	guard(URender::DrawWorld);
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE DrawWorld enter" );
+#endif
 	FMemMark SceneMark(GSceneMem);
 	FMemMark MemMark(GMem);
 	FMemMark DynMark(GDynMem);
@@ -2301,8 +2310,20 @@ void URender::DrawWorld( FSceneNode* Frame )
 	GFrameStamp++;
 
 	// Occlude and render all scene frames.
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE DrawWorld before OccludeFrame" );
+#endif
 	OccludeFrame( Frame );
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE DrawWorld after OccludeFrame before DrawFrame" );
+#endif
 	DrawFrame( Frame );
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE DrawWorld after DrawFrame" );
+#endif
 
 	// Draw the player's weapon on top.
 	APawn* Actor
@@ -2334,17 +2355,29 @@ void URender::DrawWorld( FSceneNode* Frame )
 	&&	ViewWeapon
 	&&	(Frame->Viewport->Actor->ShowFlags & SHOW_Actors) )
 	{
+#ifdef PLATFORM_AMIGA
+		if( GAmigaStartupTraceFrames > 0 )
+			AmigaDebugLogf( "[Amiga] AUTO TRACE DrawWorld before weapon" );
+#endif
 		ViewWeapon->eventInvCalcView();
 		ViewWeapon->bHidden = 0;
 		Actor->XLevel->SetActorZone( ViewWeapon, 1, 0 );
 		GRender->DrawActor( Frame, ViewWeapon );
 		ViewWeapon->bHidden = 1;
+#ifdef PLATFORM_AMIGA
+		if( GAmigaStartupTraceFrames > 0 )
+			AmigaDebugLogf( "[Amiga] AUTO TRACE DrawWorld after weapon" );
+#endif
 	}
 
 	MemMark.Pop();
 	DynMark.Pop();
 	SceneMark.Pop();
 	VectorMark.Pop();
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE DrawWorld leave" );
+#endif
 	unguard;
 }
 

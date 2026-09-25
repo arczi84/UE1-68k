@@ -1,0 +1,7 @@
+[Public]
+Object=(Name=NMiniGLDrv.NMiniGLRenderDevice,Class=Class,MetaClass=Engine.RenderDevice)
+Preferences=(Caption="Rendering",Parent="Advanced Options")
+Preferences=(Caption="MiniGL rendering",Parent="Rendering",Class=NMiniGLDrv.NMiniGLRenderDevice,Immediate=True)
+
+[NMiniGLRenderDevice]
+ClassCaption="MiniGL (Warp3D)"

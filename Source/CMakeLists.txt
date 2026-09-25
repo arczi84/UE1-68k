@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 
-project(UE1 CXX)
+project(UE1 C CXX)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_EXTENSIONS ON)
@@ -19,6 +19,9 @@ option(USE_SDL "Use NSDLDrv instead of WinDrv" ON)
 option(BUILD_EDITOR "Build Editor (GUI support requires Windows)" ON)
 option(BUILD_SOFTDRV "Build SoftDrv (x86/MSVC only)" OFF)
 option(BUILD_NOPENGLDRV "Build NOpenGLDrv" OFF)
+option(BUILD_NMINIGLDRV "Build NMiniGLDrv (AmigaOS only)" OFF)
+set(AMIGA_SHARED_MINIGL_ROOT "/mnt/d/dev/Pistorm3D/Pistorm3D_v12" CACHE PATH
+  "Path containing the dispatch-table minigl.library SDK")
 option(BUILD_NOPENGLESDRV "Build NOpenGLESDrv" ON)
 option(BUILD_NULLSOUNDDRV "Build SoundDrv (Null driver)" ON)
 option(BUILD_NOPENALDRV "Build NOpenALDrv" ON)
@@ -51,7 +54,16 @@ if(AMIGA)
   set(BUILD_EDITOR OFF)
   set(BUILD_SOFTDRV ON)
   set(BUILD_WINDRV OFF)
-  set(BUILD_NOPENGLDRV ON)
+  set(AMIGA_GL_BACKEND "MiniGL" CACHE STRING
+    "Amiga GL backend: OpenGL (StormMesa) or MiniGL")
+  set_property(CACHE AMIGA_GL_BACKEND PROPERTY STRINGS OpenGL MiniGL)
+  if(AMIGA_GL_BACKEND STREQUAL "MiniGL")
+    set(BUILD_NOPENGLDRV OFF)
+    set(BUILD_NMINIGLDRV ON)
+  else()
+    set(BUILD_NOPENGLDRV ON)
+    set(BUILD_NMINIGLDRV OFF)
+  endif()
   set(BUILD_NOPENGLESDRV OFF)
   if(AMIGA_USE_OPENAL)
     set(BUILD_NOPENALDRV ON)
@@ -377,6 +389,11 @@ if(BUILD_NOPENGLDRV)
   list(APPEND INSTALL_TARGETS NOpenGLDrv)
 endif()
 
+if(BUILD_NMINIGLDRV)
+  add_subdirectory(NMiniGLDrv)
+  list(APPEND INSTALL_TARGETS NMiniGLDrv)
+endif()
+
 if(BUILD_NOPENGLESDRV)
   add_subdirectory(NOpenGLESDrv)
   list(APPEND INSTALL_TARGETS NOpenGLESDrv)
@@ -412,3 +429,9 @@ foreach(TGT ${INSTALL_TARGETS})
 endforeach()
 
 install(FILES ${INSTALL_FILES} DESTINATION "${CMAKE_BINARY_DIR}/${CMAKE_BUILD_TYPE}")
+
+if(BUILD_NMINIGLDRV)
+  install(FILES
+    "${CMAKE_SOURCE_DIR}/../Engine/Localization/NMiniGLDrv.int"
+    DESTINATION "${CMAKE_BINARY_DIR}/${CMAKE_BUILD_TYPE}")
+endif()

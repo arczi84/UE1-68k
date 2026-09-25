@@ -96,8 +96,16 @@ SECTIONS
     *(.debug_info)
     __debug_abbrev_start = .;
     *(.debug_abbrev)
-      __debug_loclists_start = .;
+    __debug_loclists_start = .;
     *(.debug_loclists)
+    /* GCC 6.5 runtime archives also carry older DWARF location/range lists.
+     * Leaving these as orphan output sections makes the current Amiga linker
+     * emit standalone HUNK_DEBUG + relocations as loadable segments, which
+     * LoadSeg cannot load. Collect them with the rest of the debug data. */
+    __debug_loc_start = .;
+    *(.debug_loc)
+    __debug_ranges_start = .;
+    *(.debug_ranges)
     __debug_aranges_start = .;
     *(.debug_aranges)
     __debug_rgnlists_start = .;
@@ -108,5 +116,6 @@ SECTIONS
     *(.debug_str)
     __debug_line_str_start = .;
     *(.debug_line_str)
+    *(.debug_*)
   }
 }

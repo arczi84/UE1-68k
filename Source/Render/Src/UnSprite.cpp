@@ -8,6 +8,52 @@
 
 #include "RenderPrivate.h"
 
+#ifdef PLATFORM_AMIGA
+extern "C" int AmigaAllocReadable(const void* Address,unsigned long Size);
+
+// Check address and registry membership before any class traversal. IsValid()
+// alone dereferences the candidate and cannot safely handle e.g. 0x00000d3b.
+static UBOOL SpriteRegisteredObject(UObject* Object)
+{
+	return Object && !((size_t)Object&1)
+		&& AmigaAllocReadable(Object,sizeof(UObject))
+		&& GObj.GetIndexedObject(Object->GetIndex())==Object
+		&& !(Object->GetFlags() & RF_Destroyed);
+}
+
+static AWeapon* SpriteLinkedWeapon(APawn* Pawn)
+{
+	static INT Reports=0;
+	UObjectProperty* Property=::FindField<UObjectProperty>(Pawn->GetClass(),"Weapon");
+	AWeapon* Weapon=NULL;
+	// Use the same linked property layout as the VM and first-person path.
+	// Do not fall back to the known-suspect native field if metadata is absent.
+	if(!Property || Property->Offset<0 ||
+		Pawn->GetClass()->GetPropertiesSize()<(INT)sizeof(Weapon) ||
+		Property->Offset>Pawn->GetClass()->GetPropertiesSize()-(INT)sizeof(Weapon))
+	{
+		if(Reports++<8) debugf("WeaponLayout: invalid/missing Weapon property for %s",Pawn->GetName());
+		return NULL;
+	}
+	appMemcpy(&Weapon,(BYTE*)Pawn+Property->Offset,sizeof(Weapon));
+	const INT NativeOffset=(BYTE*)&Pawn->Weapon-(BYTE*)Pawn;
+	if(NativeOffset!=Property->Offset && Reports<8)
+	{
+		++Reports;
+		debugf("WeaponLayout: actor=%s native_offset=%d linked_offset=%d native_value=%p linked_value=%p",
+			Pawn->GetName(),NativeOffset,Property->Offset,(void*)Pawn->Weapon,(void*)Weapon);
+	}
+	if(!Weapon) return NULL;
+	if(!SpriteRegisteredObject(Weapon) || !SpriteRegisteredObject(Weapon->GetClass()) ||
+		!Weapon->IsA(AWeapon::StaticClass))
+	{
+		if(Reports++<8) debugf("WeaponLayout: rejected invalid Weapon=%p for %s",(void*)Weapon,Pawn->GetName());
+		return NULL;
+	}
+	return Weapon;
+}
+#endif
+
 // Parameters.
 #define SPRITE_PROJECTION_FORWARD 32.f /* Move sprite projection planes forward */
 
@@ -763,6 +809,9 @@ void URender::DrawActorSprite( FSceneNode* Frame, FDynamicSprite* Sprite )
 		guard(DrawMesh);
 		if( Frame->Viewport->Actor->RendMap==REN_Polys || Frame->Viewport->Actor->RendMap==REN_PolyCuts || Frame->Viewport->Actor->RendMap==REN_Zones || Frame->Viewport->Actor->RendMap==REN_Wire )
 			PolyFlags |= PF_FlatShaded;
+#ifdef UE_ALLOC_DIAG
+		FDrawMeshCallScope MeshCall(Sprite->Actor,Frame,Sprite,"DrawActorSprite/main");
+#endif
 		DrawMesh
 		(
 			Frame,
@@ -776,9 +825,17 @@ void URender::DrawActorSprite( FSceneNode* Frame, FDynamicSprite* Sprite )
 		);
 		extern UBOOL HasSpecialCoords;
 		extern FCoords SpecialCoords;
-		if( HasSpecialCoords && Sprite->Actor->IsA(APawn::StaticClass) && ((APawn*)Sprite->Actor)->Weapon )
+		AInventory* Weapon=NULL;
+		if( HasSpecialCoords && Sprite->Actor->IsA(APawn::StaticClass) )
 		{
-			AInventory* Weapon = ((APawn*)Sprite->Actor)->Weapon;
+#ifdef PLATFORM_AMIGA
+			Weapon=SpriteLinkedWeapon((APawn*)Sprite->Actor);
+#else
+			Weapon=((APawn*)Sprite->Actor)->Weapon;
+#endif
+		}
+		if( Weapon )
+		{
 			if( Weapon->ThirdPersonMesh )
 			{
 				Exchange( Weapon->ThirdPersonMesh, Weapon->Mesh );
@@ -786,6 +843,9 @@ void URender::DrawActorSprite( FSceneNode* Frame, FDynamicSprite* Sprite )
 				Weapon->Rotation = FRotator(0,0,0);
 				FLOAT Mirror  = Frame->Mirror;
 				Frame->Mirror = 1;
+#ifdef UE_ALLOC_DIAG
+				FDrawMeshCallScope WeaponCall(Weapon,Frame,Sprite,"DrawActorSprite/weapon");
+#endif
 				DrawMesh
 				(
 					Frame,

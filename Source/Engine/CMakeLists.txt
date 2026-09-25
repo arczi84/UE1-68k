@@ -14,3 +14,7 @@ target_include_directories(${PROJECT_NAME}
 target_link_libraries(${PROJECT_NAME} Core)
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE ENGINE_EXPORTS UPACKAGE_NAME=${PROJECT_NAME})
+
+if(AMIGA AND AMIGA_GL_BACKEND STREQUAL "MiniGL")
+  target_compile_definitions(${PROJECT_NAME} PRIVATE ENGINE_USE_MINIGL)
+endif()

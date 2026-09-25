@@ -4,3 +4,7 @@ Bin
 *.log
 Source/.vs
 Source/UnrealED/obj
+/build/
+/build-*/
+/backups/
+/Unreal-MiniGL-release-*/

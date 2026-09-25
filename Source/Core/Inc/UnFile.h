@@ -177,13 +177,20 @@ CORE_API void VARARGS appThrowf( const char* Fmt, ... );
 //
 // Normal timing.
 //
+// Optional MiniGL build: remove fine-grained rendering statistics only.
+// Engine tick timing, clocks used by gameplay, and timedemo remain unchanged.
+#if defined(UE_DISABLE_RENDER_TIMING) && (defined(RENDER_EXPORTS) || defined(NOPENGLDRV_USE_MINIGL))
+#define uclock(Timer)   {}
+#define uunclock(Timer) {}
+#else
 #define uclock(Timer)   {Timer -= appCycles();}
 #define uunclock(Timer) {Timer += appCycles()-34;}
+#endif
 
 //
 // Performance critical timing.
 //
-#if DO_SLOW_CLOCK
+#if DO_SLOW_CLOCK && !(defined(UE_DISABLE_RENDER_TIMING) && (defined(RENDER_EXPORTS) || defined(NOPENGLDRV_USE_MINIGL)))
 	#define clockSlow(Timer)   {Timer-=appCycles();}
 	#define unclockSlow(Timer) {Timer+=appCycles();}
 #else

@@ -1,0 +1,41 @@
+Unreal MiniGL - fresh source build with preserved GCC 6.5
+
+Compiler: /opt/amiga-gcc65-250215183648/bin/m68k-amigaos-g++
+Rename pending administrator access; until then the build script uses
+/opt/amiga4.3.2, which contains the same preserved compiler.
+Compiler version:
+GCC 6.5.0b 250215183648 (same version as the working readcache build).
+CRT, libstdc++ and libgcc resolve under the selected compiler directory.
+Do NOT use /opt/amiga: it now contains GCC 6.5.0b 20260819091705.
+
+Rebuild from source:
+  bash tools/build-minigl-gcc65-known-release.sh
+Build directory: build/gcc65-known-release-v27
+Parallelism: -j16. All engine objects rebuilt from current source.
+The wrapper checks the compiler banner and refuses a different version.
+AMIGA_NATIVE_CXX_STDLIB=ON avoids the GCC15 ABI/header graft.
+
+Graphics SDK: /mnt/d/dev/Pistorm3D/MiniGL_Classic_v27
+Prepared locally in build/sdk-minigl-v27-gcc65 by prepare-minigl-v27-sdk.sh.
+Dispatch headers plus mglQ3 Classic headers, as ordered by the SDK's
+Makefile_dispatch_classic.gcc. Import archive uses v27 base/LVO sources and
+UE's MiniGLClient.c, built with the same GCC 6.5. No v12 header/archive used.
+Compile-time v27 ABI assertions passed: ABI 3, table size 632 bytes.
+Requires matching v27 minigl.library on the Amiga; no driver is bundled.
+UE validates ABI 3 and the used 624-byte v25 prefix, not the unused v27
+context-from-window/bitmap suffix. Thus compatible shorter tables are accepted.
+Opening failures report the exact stage, ABI/size or context parameters in
+normal Unreal.log; no extra diagnostic files are created.
+
+Release, effective O3, existing per-file Og exceptions retained.
+-noixemul -m68060 -mhard-float -fomit-frame-pointer -ffast-math
+-fno-PIC -fno-pic -fno-strict-aliasing -g0
+UE_DISABLE_RENDER_TIMING, UE_MINIGL_HASHCACHE, UE_MINIGL_READCACHE,
+UE_MINIGL_STABLE_BASELINE, UE_RELEASE_PACKAGE.
+No profiling, batching, startup trace output or renderer test switches.
+Normal error checks and Unreal.log retained.
+
+This is a fresh compilation, not a renamed historical executable.
+HUNK structure and isolated mipmap loading test passed.
+Full game startup/gameplay on PiStorm still requires confirmation.
+Source snapshot and compiler hashes are saved under build/source-snapshots.

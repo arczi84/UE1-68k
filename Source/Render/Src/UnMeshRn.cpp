@@ -8,6 +8,19 @@
 
 #include "RenderPrivate.h"
 
+#ifdef UE_ALLOC_DIAG
+static void AllocDiagName(UObject* Object,char* Dest,INT Length)
+{
+	appStrncpy(Dest,"<invalid>",Length);
+	if(((size_t)Object&1) || !AmigaAllocReadable(Object,sizeof(UObject))) return;
+	INT Index=Object->GetFName().GetIndex();
+	if(Index<0 || Index>=FName::GetMaxNames()) return;
+	FNameEntry* Entry=FName::GetEntry(Index);
+	if(((size_t)Entry&1) || !AmigaAllocReadable(Entry,sizeof(FNameEntry))) return;
+	appStrncpy(Dest,Entry->Name,Min(Length,(INT)sizeof(Entry->Name)));
+}
+#endif
+
 /*------------------------------------------------------------------------------
 	Globals.
 ------------------------------------------------------------------------------*/
@@ -303,7 +316,53 @@ void URender::DrawMesh
 	guard(URender::DrawMesh);
 	STAT(uclock(GStat.MeshTime));
 	FMemMark Mark(GMem);
+#ifdef UE_ALLOC_DIAG
+	FAllocDiagScope AllocScope;
+	appMemset(&GAllocDiag,0,sizeof(GAllocDiag));
+	GAllocDiag.ActorAddress=Owner;
+	GAllocDiag.ActorSize=sizeof(AActor);
+	GAllocDiag.MeshSize=sizeof(UMesh);
+	GAllocDiag.Stage="validate actor before dereference";
+	if(GDrawMeshCall.Site && GDrawMeshCall.Actor!=Owner)
+	{
+		appAllocDiagFailure(0,"actor argument differs from caller snapshot");
+		appErrorf("DrawMesh actor argument mismatch");
+	}
+	if(((size_t)Owner&1) || !AmigaAllocReadable(Owner,sizeof(AActor)))
+	{
+		appAllocDiagFailure(0,"actor address outside RAM");
+		appErrorf("Invalid actor address in DrawMesh");
+	}
+#endif
 	UMesh*  Mesh = Owner->Mesh;
+#ifdef UE_ALLOC_DIAG
+	GAllocDiag.MeshAddress=Mesh;
+	GAllocDiag.MeshOffset=(BYTE*)&Owner->Mesh-(BYTE*)Owner;
+	GAllocDiag.ActorIndex=Owner->GetIndex();
+	GAllocDiag.ActorRegistered=GObj.GetIndexedObject(GAllocDiag.ActorIndex)==Owner;
+	AllocDiagName(Owner,GAllocDiag.Actor,sizeof(GAllocDiag.Actor));
+	AllocDiagName(Owner->GetClass(),GAllocDiag.Class,sizeof(GAllocDiag.Class));
+	GAllocDiag.Stage="validate mesh before dereference";
+	if(((size_t)Mesh&1) || !AmigaAllocReadable(Mesh,sizeof(UMesh)))
+	{
+		appAllocDiagFailure(0,"mesh address outside RAM");
+		appErrorf("Invalid mesh address in DrawMesh");
+	}
+	GAllocDiag.MeshIndex=Mesh->GetIndex();
+	GAllocDiag.MeshRegistered=GObj.GetIndexedObject(GAllocDiag.MeshIndex)==Mesh;
+	GAllocDiag.FrameVertsOffset=(BYTE*)&Mesh->FrameVerts-(BYTE*)Mesh;
+	GAllocDiag.TrisOffset=(BYTE*)&Mesh->Tris-(BYTE*)Mesh;
+	AllocDiagName(Mesh,GAllocDiag.Mesh,sizeof(GAllocDiag.Mesh));
+	GAllocDiag.Verts=Mesh->FrameVerts;
+	GAllocDiag.Tris=Mesh->Tris.Num();
+	GAllocDiag.Particles=Owner->bParticles;
+	if(!GAllocDiag.ActorRegistered || !GAllocDiag.MeshRegistered)
+	{
+		appAllocDiagFailure(GAllocDiag.Verts,"object registry mismatch before DrawMesh");
+		appErrorf("Unregistered actor or mesh in DrawMesh");
+	}
+	GAllocDiag.Stage="Samples/GetFrame";
+#endif
 	FVector Hack = FVector(0,-8,0);
 	UBOOL NotWeaponHeuristic=(Owner->Owner!=Frame->Viewport->Actor);
 	if( !Engine->Client->CurvedSurfaces )
@@ -373,6 +432,10 @@ void URender::DrawMesh
 	if( Owner->bParticles )
 	{
 		guardSlow(Particles);
+#ifdef UE_ALLOC_DIAG
+		GAllocDiag.Stage="SortedPts/Particles";
+		if(!Owner->Texture) appAllocDiagFailure(0,"particle Texture is NULL");
+#endif
 		check(Owner->Texture);
 		FTransform** SortedPts = New<FTransform*>(GMem,Mesh->FrameVerts);
 		INT Count=0;
@@ -425,8 +488,17 @@ void URender::DrawMesh
 	{
 		// Process triangles.
 		guardSlow(Process);
+#ifdef UE_ALLOC_DIAG
+		GAllocDiag.Stage="TriPool";
+#endif
 		TriPool    = New<FMeshTriSort>(GMem,Mesh->Tris.Num());
+#ifdef UE_ALLOC_DIAG
+		GAllocDiag.Stage="TriNormals";
+#endif
 		TriNormals = New<FVector>(GMem,Mesh->Tris.Num());
+#ifdef UE_ALLOC_DIAG
+		GAllocDiag.Stage="ProcessTriangles";
+#endif
 
 		// Set up list for triangle sorting, adding all possibly visible triangles.
 		STAT(uclock(GStat.MeshProcessTime));

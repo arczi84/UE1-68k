@@ -231,6 +231,8 @@ struct FFileStatus
 //
 // Ansi file loader.
 //
+#include "UnArrayDiag.h"
+
 class FArchiveFileLoad : public FArchive
 {
 public:
@@ -239,6 +241,9 @@ public:
 	FArchiveFileLoad( const char* InFilename )
 	: File(NULL)
 	, Pos(0)
+#ifdef UE_MINIGL_READCACHE
+	, ReadBuffer(NULL), ReadStart(0), ReadCount(0), FilePos(0), UseReadCache(1)
+#endif
 	{
 		guard(FArchiveFileLoad::FArchiveFileLoad);
 		appStrcpy( Filename, InFilename );
@@ -248,14 +253,24 @@ public:
 		appFseek( File, 0, USEEK_END );
 		Eof = appFtell( File );
 		appFseek( File, 0, USEEK_SET );
+#ifdef UE_MINIGL_READCACHE
+		Parse( appCmdLine(), "MGLREADCACHE=", UseReadCache );
+#endif
 		unguard;
 	}
 	FArchiveFileLoad()
-	: File(NULL)
+	: File(NULL), Pos(0)
+#ifdef UE_MINIGL_READCACHE
+	, ReadBuffer(NULL), ReadStart(0), ReadCount(0), FilePos(0), UseReadCache(0)
+#endif
 	{}
 	~FArchiveFileLoad()
 	{
 		guard(FArchiveFileLoad::~FArchiveFileLoad);
+#ifdef UE_MINIGL_READCACHE
+		if( ReadBuffer )
+			appFree( ReadBuffer );
+#endif
 		if( File )
 			appFclose( File );
 		File = NULL;
@@ -266,6 +281,16 @@ public:
 		guard(FArchiveFileLoad::Seek);
 		check(InPos>=0);
 		check(InPos<=Eof);
+#ifdef UE_MINIGL_READCACHE
+		if( UseReadCache )
+		{
+			if( InPos<0 || InPos>Eof )
+				appErrorf( "Read cache seek outside file: %i/%i", InPos, Eof );
+			// The underlying FILE cursor is moved only on a cache miss.
+			Pos = InPos;
+			return;
+		}
+#endif
 		INT Result = appFseek(File,InPos,USEEK_SET);
 		if( Result!=0 )
 			appErrorf( "Seek Failed %i/%i (%i): %i %i", InPos, Eof, Pos, Result, appFerror(File) );
@@ -274,15 +299,26 @@ public:
 	}
 	INT Tell()
 	{
+#ifdef UE_MINIGL_READCACHE
+		if( UseReadCache )
+			return Pos;
+#endif
 		return appFtell( File );
 	}
 	void Push( FFileStatus& St, BYTE* NewBuffer )
 	{
-		St.SavedPos = appFtell( File );
+		St.SavedPos = Tell();
 	}
 	void Pop( FFileStatus& St )
 	{
 		guardSlow(FArchiveFileLoad::Pop);
+#ifdef UE_MINIGL_READCACHE
+		if( UseReadCache )
+		{
+			Seek( St.SavedPos );
+			return;
+		}
+#endif
 		INT Result = appFseek( File, St.SavedPos, USEEK_SET );
 		if( Result!=0 )
 			appErrorf( "Seek Failed %i/%i (%i): %i %i", St.SavedPos, Eof, Pos, Result, appFerror(File) );
@@ -291,6 +327,55 @@ public:
 	}
 	FArchive& Serialize( void* V, INT Length )
 	{
+#ifdef UE_MINIGL_READCACHE
+		if( UseReadCache )
+		{
+			// Subtraction avoids signed overflow on malformed package lengths.
+			if( Pos<0 || Pos>Eof || Length<0 || Length>Eof-Pos )
+				appErrorf( "Read cache outside file: Pos=%i Length=%i Size=%i", Pos, Length, Eof );
+			BYTE* Dest = (BYTE*)V;
+			while( Length>0 )
+			{
+				if( Pos>=ReadStart && Pos-ReadStart<ReadCount )
+				{
+					INT Offset = Pos-ReadStart;
+					INT Count = Min( Length, ReadCount-Offset );
+					appMemcpy( Dest, ReadBuffer+Offset, Count );
+					Dest += Count;
+					Pos += Count;
+					Length -= Count;
+					continue;
+				}
+				if( FilePos!=Pos )
+				{
+					if( appFseek( File, Pos, USEEK_SET )!=0 )
+						appErrorf( "Read cache seek failed: %i Error=%i", Pos, appFerror(File) );
+					FilePos = Pos;
+				}
+				// Large blocks go straight into the caller's buffer, avoiding a copy.
+				if( Length>=ReadCapacity )
+				{
+					FilePos = -1; // Force a seek if a failed read is caught by the caller.
+					if( appFread( Dest, 1, Length, File )!=Length )
+						appErrorf( "Read cache direct read failed: %i Error=%i", Length, appFerror(File) );
+					Pos += Length;
+					FilePos = Pos;
+					return *this;
+				}
+				if( !ReadBuffer )
+					ReadBuffer = (BYTE*)appMalloc( ReadCapacity, "PackageReadCache" );
+				ReadStart = Pos;
+				INT Wanted = Min( (INT)ReadCapacity, Eof-Pos );
+				ReadCount = 0; // A partial/failed refill must never become a cache hit.
+				FilePos = -1;
+				if( appFread( ReadBuffer, 1, Wanted, File )!=Wanted )
+					appErrorf( "Read cache refill failed: %i Error=%i", Wanted, appFerror(File) );
+				ReadCount = Wanted;
+				FilePos = Pos+ReadCount;
+			}
+			return *this;
+		}
+#endif
 		INT Count = appFread( V, Length, 1, File );
 		if( Count!=1 && Length!=0 )
 			appErrorf( "appFread failed: Count=%i Length=%i Error=%i", Count, Length, appFerror(File) );
@@ -301,6 +386,11 @@ public:
 //!!private:
 	FILE* File;
 	INT Eof;
+#ifdef UE_MINIGL_READCACHE
+	enum { ReadCapacity=64*1024 };
+	BYTE* ReadBuffer;
+	INT ReadStart, ReadCount, FilePos, UseReadCache;
+#endif
 };
 
 /*----------------------------------------------------------------------------
@@ -964,6 +1054,9 @@ private:
 		Seek( Export.SerialOffset, Export.SerialSize );
 
 		// Load the object.
+#ifdef UE_ARRAY_DIAG
+		FArrayDiagScope ArrayDiag( Filename, Object->GetFullName(), this, Export.SerialOffset, Export.SerialSize );
+#endif
 		Object->Serialize( *this );
 		//debugf(NAME_Log,"    %s: %i", Object->GetFullName(), Export.Size );
 

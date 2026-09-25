@@ -10,6 +10,9 @@ if(AMIGA)
   # Large swapped stack for UE's deep recursion (see AmigaStack.c). Kept a .c
   # file so exec/types.h doesn't collide with the engine's BYTE/WORD typedefs.
   list(APPEND SRC_FILES "Src/AmigaStack.c" "Src/AmigaRawMouse.c")
+  if(AMIGA_GL_BACKEND STREQUAL "MiniGL")
+    list(APPEND SRC_FILES "Src/SDLAmigaNoGL.c")
+  endif()
 
   # GCC 6's stock gprof sampler is tied to the chipset VBlank interrupt.  RTG
   # systems can therefore produce call counts but an empty time histogram.
@@ -63,6 +66,7 @@ else()
 endif()
 
 if(AMIGA)
+  if(NOT AMIGA_GL_BACKEND STREQUAL "MiniGL")
   # The stock Amiga SDL 1.2 CGX backend drops SDL_FULLSCREEN when
   # BestCModeIDTags cannot see a board's 16-bit modes.  VideoCore exposes
   # RGB16PC modes and triggers exactly that path.  Build the two patched CGX
@@ -110,27 +114,67 @@ if(AMIGA)
     VERBATIM)
   add_custom_target(SDLAmigaVideoFix DEPENDS "${SDL_AMIGA_FIX_LIB}")
   add_dependencies(${PROJECT_NAME} SDLAmigaVideoFix)
+  endif()
 
   # Custom linker script: gathers C++ global constructors into a dense
   # [__UE_CTOR_START, __UE_CTOR_END) array that main() runs itself, since
   # libnix's crt never walks the constructor list. -T replaces the default
   # script, so amiga68k.ld is a copy of it plus the CTOR bracketing.
   target_link_options(${PROJECT_NAME} PRIVATE
-    "-T${CMAKE_SOURCE_DIR}/cmake/amiga68k.ld"
-    "-Wl,--wrap=AmigaMesaCreateContext")
+    "-T${CMAKE_SOURCE_DIR}/cmake/amiga68k.ld")
+  set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY LINK_DEPENDS
+    "${CMAKE_SOURCE_DIR}/cmake/amiga68k.ld")
 
-  # libSDL_libnix.a has built-in GL support (SDL_cgxgl) that references
-  # AmigaMesa*/gl* from libGL, and libGL in turn needs SDL's context glue, so
-  # the two archives are mutually dependent: wrap them in a link group so ld
-  # resolves across them in one pass. -ldebug supplies kprintf (referenced by
-  # libSDL_libnix).
-  target_link_libraries(${PROJECT_NAME}
-    "-L${AMIGA_SDK_ROOT}/lib"
-    -Wl,--start-group "${SDL_AMIGA_FIX_LIB}" -lGL -Wl,--end-group
-    -lpthread
-    -lm
-    -ldebug
-  )
+  if(AMIGA_GL_BACKEND STREQUAL "MiniGL")
+    # SDL remains responsible for joystick/audio, but its stock archive also
+    # embeds the SDL/StormMesa GL bridge.  Remove only those two members from
+    # a private copy so SDL can never create or own the MiniGL context.
+    set(SDL_AMIGA_NOGL_DIR "${CMAKE_BINARY_DIR}/SDLAmigaNoGL")
+    set(SDL_AMIGA_NOGL_LIB "${SDL_AMIGA_NOGL_DIR}/libSDL_libnix_nogl.a")
+    add_custom_command(
+      OUTPUT "${SDL_AMIGA_NOGL_LIB}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${SDL_AMIGA_NOGL_DIR}"
+      COMMAND "${CMAKE_COMMAND}" -E copy
+        "${AMIGA_SDK_ROOT}/lib/libSDL_libnix.a" "${SDL_AMIGA_NOGL_LIB}"
+      COMMAND "${CMAKE_AR}" d "${SDL_AMIGA_NOGL_LIB}"
+        SDL_cgxgl.go SDL_cgxgl_wrapper.go
+      COMMAND "${CMAKE_RANLIB}" "${SDL_AMIGA_NOGL_LIB}"
+      DEPENDS "${AMIGA_SDK_ROOT}/lib/libSDL_libnix.a"
+      VERBATIM)
+    add_custom_target(SDLAmigaNoGL DEPENDS "${SDL_AMIGA_NOGL_LIB}")
+    add_dependencies(${PROJECT_NAME} SDLAmigaNoGL)
+
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+      AMIGA_USE_MINIGL
+      AMIGA_USE_SHARED_MINIGL
+      AMIGA_USE_NATIVE_MINIGL)
+    target_include_directories(${PROJECT_NAME} BEFORE PRIVATE
+      "${AMIGA_SHARED_MINIGL_ROOT}/include")
+    target_link_libraries(${PROJECT_NAME}
+      "-L${AMIGA_SDK_ROOT}/lib"
+      -Wl,--start-group
+      "${SDL_AMIGA_NOGL_LIB}"
+      "${AMIGA_SHARED_MINIGL_ROOT}/libminigl_dispatch.a"
+      "${AMIGA_SDK_ROOT}/lib/libSDL_mixer.a"
+      "${AMIGA_SDK_ROOT}/lib/libmodplug.a"
+      -Wl,--end-group
+      -lpthread
+      -lm
+      -ldebug
+    )
+  else()
+    target_link_options(${PROJECT_NAME} PRIVATE
+      "-Wl,--wrap=AmigaMesaCreateContext")
+    # libSDL_libnix.a has built-in GL support (SDL_cgxgl) that references
+    # AmigaMesa*/gl* from libGL, and libGL in turn needs SDL's context glue.
+    target_link_libraries(${PROJECT_NAME}
+      "-L${AMIGA_SDK_ROOT}/lib"
+      -Wl,--start-group "${SDL_AMIGA_FIX_LIB}" -lGL -Wl,--end-group
+      -lpthread
+      -lm
+      -ldebug
+    )
+  endif()
 endif()
 
 if(VITA)

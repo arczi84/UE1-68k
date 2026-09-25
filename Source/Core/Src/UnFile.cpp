@@ -7,6 +7,7 @@
 =============================================================================*/
 
 #include "CorePrivate.h"
+#include "UnArrayDiag.h"
 
 #include <math.h>
 #include <float.h>
@@ -14,6 +15,58 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef UE_ARRAY_DIAG
+FArrayDiagContext GArrayDiagContext = { "outside object serialization", "none", NULL, 0, 0 };
+extern "C" const char _stext;
+extern "C" void AmigaArrayReport( const char* Text );
+static void ReportBadArray( const char* Reason, void* Array, void* Data, INT Num,
+	INT Max, INT ElementSize, DWORD Bytes, void* Caller )
+{
+	char Text[1200];
+	INT Position = GArrayDiagContext.Archive ? GArrayDiagContext.Archive->Tell() : -1;
+	snprintf( Text, sizeof(Text),
+		"Array diagnostic " __DATE__ " " __TIME__ "\n"
+		"reason=%s array=%p data=%p num=%d max=%d element=%d bytes_hex=%08lx\n"
+		"caller=%p text_offset=%08lx\nfile=%s\nobject=%s\nposition=%d export_offset=%d export_size=%d\n",
+		Reason, Array, Data, Num, Max, ElementSize, (unsigned long)Bytes, Caller,
+		(unsigned long)Caller-(unsigned long)&_stext, GArrayDiagContext.File,
+		GArrayDiagContext.Object, Position, GArrayDiagContext.Offset, GArrayDiagContext.Size );
+	AmigaArrayReport( Text );
+	appErrorf( "%s", Text );
+}
+#endif
+
+#ifdef UE_ALLOC_DIAG
+FAllocDiagContext GAllocDiag = {};
+FDrawMeshCallContext GDrawMeshCall = {};
+extern "C" void AmigaAllocReport(const char* Text, const void* Actor, unsigned long ActorSize, const void* Mesh, unsigned long MeshSize);
+CORE_API void appAllocDiagFailure(INT Size, const char* Reason)
+{
+	static INT Reported=0;
+	if(Reported) return;
+	Reported=1;
+	// Snapshot names were copied before rendering; don't dereference actors
+	// or allocate through the engine once malloc has failed.
+	static char Text[2048];
+	snprintf(Text,sizeof(Text),
+		"UE allocation diagnostic " __DATE__ " " __TIME__ "\nreason=%s size_or_count=%d hex=%08lx\n"
+		"actor=%s class=%s mesh=%s\nstage=%s verts=%d tris=%d particles=%d\n"
+		"actor_ptr=%p mesh_ptr=%p sizeof_actor=%d sizeof_mesh=%d\n"
+		"actor_mesh_offset=%d mesh_frameverts_offset=%d mesh_tris_offset=%d\n"
+		"actor_index=%d mesh_index=%d actor_registered=%d mesh_registered=%d\n"
+		"caller_site=%s caller_actor=%p caller_frame=%p caller_sprite=%p actor_matches=%d\n",
+		Reason,Size,(unsigned long)(DWORD)Size,GAllocDiag.Actor,GAllocDiag.Class,
+		GAllocDiag.Mesh,GAllocDiag.Stage ? GAllocDiag.Stage : "outside DrawMesh",
+		GAllocDiag.Verts,GAllocDiag.Tris,GAllocDiag.Particles,
+		GAllocDiag.ActorAddress,GAllocDiag.MeshAddress,GAllocDiag.ActorSize,GAllocDiag.MeshSize,
+		GAllocDiag.MeshOffset,GAllocDiag.FrameVertsOffset,GAllocDiag.TrisOffset,
+		GAllocDiag.ActorIndex,GAllocDiag.MeshIndex,GAllocDiag.ActorRegistered,GAllocDiag.MeshRegistered,
+		GDrawMeshCall.Site ? GDrawMeshCall.Site : "none",GDrawMeshCall.Actor,
+		GDrawMeshCall.Frame,GDrawMeshCall.Sprite,(INT)(GDrawMeshCall.Actor==GAllocDiag.ActorAddress));
+	AmigaAllocReport(Text,GAllocDiag.ActorAddress,GAllocDiag.ActorSize,GAllocDiag.MeshAddress,GAllocDiag.MeshSize);
+}
+#endif
 
 #ifdef PLATFORM_WIN32
 #include <direct.h>
@@ -77,6 +130,12 @@ void FArchive::Printf( const char* Fmt, ... )
 void FArray::Realloc( INT ElementSize )
 {
 	guard(FArray::Realloc);
+#ifdef UE_ARRAY_DIAG
+	if( ArrayNum<0 || ArrayMax<0 || ArrayNum>ArrayMax || ElementSize<=0
+		|| (DWORD)ArrayMax>0x7fffffffUL/(DWORD)ElementSize )
+		ReportBadArray( "FArray::Realloc", this, Data, ArrayNum, ArrayMax, ElementSize,
+			(DWORD)ArrayMax*(DWORD)ElementSize, __builtin_return_address(0) );
+#endif
 	Data = appRealloc( Data, ArrayMax*ElementSize, "FArray" );
 	unguardf(( "%i*%i", ArrayMax, ElementSize ));
 }
@@ -221,9 +280,15 @@ CORE_API void appDumpAllocs( FOutputDevice* Out )
 CORE_API void* appMalloc( INT Size, const char* Tag )
 {
 	guard(appMalloc);
+#ifdef UE_ALLOC_DIAG
+	if(Size<=0) appAllocDiagFailure(Size,Tag);
+#endif
 	check(Size>0);
 
 	void* Ptr = malloc( Size );
+#ifdef UE_ALLOC_DIAG
+	if(!Ptr) appAllocDiagFailure(Size,Tag);
+#endif
 	check(Ptr);
 
 #if CHECK_ALLOCS
@@ -249,6 +314,10 @@ CORE_API void appFree( void* Ptr )
 CORE_API void* appRealloc( void* Ptr, INT NewSize, const char* Tag )
 {
 	guard(appRealloc);
+#ifdef UE_ARRAY_DIAG
+	if( NewSize<0 )
+		ReportBadArray( Tag, NULL, Ptr, -1, NewSize, 1, (DWORD)NewSize, __builtin_return_address(0) );
+#endif
 	check(NewSize>=0);
 
 #if CHECK_ALLOCS

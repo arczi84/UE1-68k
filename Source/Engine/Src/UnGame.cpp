@@ -10,10 +10,15 @@
 #include "UnRender.h"
 #include "UnNet.h"
 
+#ifdef UE_AMIGA_GPROF
+extern "C" void _moncleanup(void);
+#endif
+
 #ifdef PLATFORM_AMIGA
 extern "C" void AmigaDebugLogf( const char* Fmt, ... );
 extern "C" DWORD SDL_GetTicks( void );
 extern INT GAmigaActorProfileRequests;
+extern INT GAmigaStartupTraceFrames;
 #endif
 
 // Unattended benchmark state.  Kept at file scope rather than in UGameEngine
@@ -39,6 +44,22 @@ static DOUBLE AutoTimedemoWorstFrame = 0.0;
 // up after this many seconds rather than running forever.
 static INT   AutoTimedemoTimeout = 300;
 static DOUBLE AutoTimedemoStart  = 0.0;
+// Identity only: never dereference this pointer after the script removes its HUD.
+static UObject* AutoTimedemoHUD = NULL;
+
+static void CancelAutoTimedemo( const char* Reason )
+{
+	if( !AutoTimedemoActive )
+		return;
+	AutoTimedemoActive = 0;
+	AutoTimedemoDone = 0;
+	AutoTimedemoHUD = NULL;
+	AutoTimedemoResult[0] = 0;
+	AutoTimedemoStart = 0.0;
+	AutoTimedemoWallFrames = 0;
+	AutoTimedemoWallStart = AutoTimedemoWallLast = AutoTimedemoWorstFrame = 0.0;
+	debugf( "AutoTimedemo: cancelled (%s); automatic exit disabled", Reason );
+}
 
 //
 // Watch broadcast messages for the TimeDemo HUD's completed-cycle result.
@@ -214,6 +235,11 @@ void UGameEngine::Init()
 		AutoTimedemoActive = 1;
 		AutoTimedemoDone   = 0;
 		AutoTimedemoStart  = 0.0;
+		AutoTimedemoResult[0] = 0;
+		AutoTimedemoWallFrames = 0;
+		AutoTimedemoWallStart = AutoTimedemoWallLast = AutoTimedemoWorstFrame = 0.0;
+		AutoTimedemoHUD = Client->Viewports(0)->Actor
+			? Client->Viewports(0)->Actor->myHUD : NULL;
 	}
 
 	debugf( NAME_Init, "Game engine initialized" );
@@ -388,6 +414,9 @@ static void MatchViewportsToActors( UClient* Client, ULevel* Level, const FURL& 
 UBOOL UGameEngine::Browse( FURL URL, char* Error256 )
 {
 	guard(UGameEngine::Browse);
+	// Includes new game, load game and console OPEN/START/TIMEDEMO. The initial
+	// automatic TIMEDEMO arms its state only after this Browse has returned.
+	CancelAutoTimedemo( "level travel requested" );
 	check(Error256);
 	Error256[0]=0;
 	const char* Option;
@@ -539,6 +568,7 @@ UBOOL UGameEngine::Browse( FURL URL, char* Error256 )
 ULevel* UGameEngine::LoadMap( const FURL& URL, UPendingLevel* Pending, char* Error256 )
 {
 	guard(UGameEngine::LoadMap);
+	CancelAutoTimedemo( "loading a map" );
 	check(!GIsEditor);
 	Error256[0]=0;
 	FString Str;
@@ -1005,6 +1035,10 @@ ULevel* UGameEngine::LoadMap( const FURL& URL, UPendingLevel* Pending, char* Err
 void UGameEngine::Draw( UViewport* Viewport, BYTE* HitData, INT* HitSize )
 {
 	guard(UGameEngine::Draw);
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE GameDraw enter" );
+#endif
 
 	// Get view location.
 	AActor*      ViewActor    = Viewport->Actor;
@@ -1018,6 +1052,10 @@ void UGameEngine::Draw( UViewport* Viewport, BYTE* HitData, INT* HitSize )
 	FCheckResult Hit;
 	if( !GLevel->Model->PointCheck(Hit,NULL,ViewLocation,FVector(0,0,0),0) )
 		LockFlags |= LOCKR_ClearScreen;
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE GameDraw after view/point-check lockflags=%lu", (unsigned long)LockFlags );
+#endif
 
 	// Lock the Viewport.
 	check(Render);
@@ -1029,11 +1067,19 @@ void UGameEngine::Draw( UViewport* Viewport, BYTE* HitData, INT* HitSize )
 	FlashFog.X   = Clamp( FlashFog.X  , 0.f, 1.f );
 	FlashFog.Y   = Clamp( FlashFog.Y  , 0.f, 1.f );
 	FlashFog.Z   = Clamp( FlashFog.Z  , 0.f, 1.f );
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE GameDraw before viewport-lock" );
+#endif
 	if( !Viewport->Lock(FlashScale,FlashFog,FPlane(0,0,0,0),LockFlags,HitData,HitSize) )
 	{
 		debugf( NAME_Warning, "Couldn't lock Viewport for drawing" );
 		return;
 	}
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE GameDraw after viewport-lock" );
+#endif
 
 	// Setup rendering coords.
 	FMemMark SceneMark(GSceneMem);
@@ -1046,6 +1092,10 @@ void UGameEngine::Draw( UViewport* Viewport, BYTE* HitData, INT* HitSize )
 		Audio->Update( ViewActor->Region, Frame->Coords );
 		uunclock(GLevel->AudioTickCycles);
 	}
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE GameDraw after audio-update" );
+#endif
 	FMemMark MemMark(GMem);
 	FMemMark DynMark(GDynMem);
 
@@ -1056,18 +1106,44 @@ void UGameEngine::Draw( UViewport* Viewport, BYTE* HitData, INT* HitSize )
 	Viewport->Canvas->Update( Frame );
 	Viewport->Actor->eventPreRender( Viewport->Canvas );
 	if( Frame->X>0 && Frame->Y>0 )
+	{
+#ifdef PLATFORM_AMIGA
+		if( GAmigaStartupTraceFrames > 0 )
+			AmigaDebugLogf( "[Amiga] AUTO TRACE GameDraw before DrawWorld" );
+#endif
 		Render->DrawWorld( Frame );
+	}
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE GameDraw after DrawWorld" );
+#endif
 	Viewport->RenDev->EndFlash();
 	Viewport->Actor->eventPostRender( Viewport->Canvas );
 	if( Viewport->Console )
 		Viewport->Console->PostRender( Frame );
 	Render->PostRender( Frame );
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE GameDraw after post-render/HUD" );
+#endif
 
 	// Done.
+	#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE GameDraw before viewport-unlock" );
+	#endif
 	Viewport->Unlock( 1 );
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE GameDraw after viewport-unlock" );
+#endif
 	MemMark.Pop();
 	DynMark.Pop();
 	SceneMark.Pop();
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE GameDraw leave" );
+#endif
 
 	unguard;
 }
@@ -1165,6 +1241,13 @@ INT UGameEngine::GetMaxTickRate()
 void UGameEngine::Tick( FLOAT DeltaSeconds )
 {
 	guard(UGameEngine::Tick);
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+	{
+		debugf( NAME_Init, "FIRST: EngineTick enter" );
+		AmigaDebugLogf( "[Amiga] AUTO FIRST EngineTick enter" );
+	}
+#endif
 	INT LocalTickCycles=0;
 	uclock(LocalTickCycles);
 #ifdef PLATFORM_AMIGA
@@ -1181,6 +1264,18 @@ void UGameEngine::Tick( FLOAT DeltaSeconds )
 		debugf("All Windows Closed");
 		appRequestExit();
 		return;
+	}
+
+	// The script aborts the demo when the menu opens and restores the old HUD.
+	// Cancel the native watchdog as well, BEFORE processing a result/timeout,
+	// including when Escape was pressed on the last frame of the benchmark.
+	if( AutoTimedemoActive && Client && Client->Viewports.Num() )
+	{
+		APlayerPawn* Player = Client->Viewports(0)->Actor;
+		if( Player && Player->bShowMenu )
+			CancelAutoTimedemo( "menu opened" );
+		else if( AutoTimedemoHUD && (!Player || Player->myHUD != AutoTimedemoHUD) )
+			CancelAutoTimedemo( "benchmark HUD removed" );
 	}
 
 	// Unattended benchmark: quit once the TimeDemo HUD reports a completed
@@ -1213,6 +1308,10 @@ void UGameEngine::Tick( FLOAT DeltaSeconds )
 
 		if( AutoTimedemoDone || TimedOut )
 		{
+#ifdef UE_AMIGA_GPROF
+			// Preserve the profile even if subsequent renderer teardown faults.
+			_moncleanup();
+#endif
 			// One timestamped file per run, so successive benchmarks pile up
 			// instead of overwriting each other.
 			char ResultDir[192] = "PROGDIR:fps_logs";
@@ -1262,6 +1361,19 @@ void UGameEngine::Tick( FLOAT DeltaSeconds )
 				debugf( "AutoTimedemo: %s -> %s", AutoTimedemoResult, ResultFile );
 			else
 				debugf( "AutoTimedemo: timed out after %i seconds", AutoTimedemoTimeout );
+
+#ifdef ENGINE_USE_MINIGL
+			// MiniGL may still reference the last frame's client-side geometry.
+			// Drain it while the level and scene allocators are alive. If this is
+			// deferred to render-device destruction, UE has already released that
+			// memory and MiniGL's final draw/clip pass faults during glFinish().
+			if( Client && Client->Viewports.Num() && Client->Viewports(0)->RenDev )
+			{
+				debugf( "AutoTimedemo: flushing MiniGL before engine teardown" );
+				Client->Viewports(0)->RenDev->Flush();
+				debugf( "AutoTimedemo: MiniGL flush complete" );
+			}
+#endif
 			AutoTimedemoActive = 0;
 			appRequestExit();
 			return;
@@ -1282,8 +1394,22 @@ void UGameEngine::Tick( FLOAT DeltaSeconds )
 	else WasPaused=0;
 
 	// Update subsystems.
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+	{
+		debugf( NAME_Init, "FIRST: EngineTick before object/cache tick" );
+		AmigaDebugLogf( "[Amiga] AUTO FIRST EngineTick before object/cache tick" );
+	}
+#endif
 	GObj.Tick();				
 	GCache.Tick();
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+	{
+		debugf( NAME_Init, "FIRST: EngineTick after object/cache tick" );
+		AmigaDebugLogf( "[Amiga] AUTO FIRST EngineTick after object/cache tick" );
+	}
+#endif
 
 	// Update the level.
 	guard(TickLevel);
@@ -1301,8 +1427,19 @@ void UGameEngine::Tick( FLOAT DeltaSeconds )
 #endif
 	uunclock(GameCycles);
 	unguard;
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+	{
+		debugf( NAME_Init, "FIRST: EngineTick after level tick" );
+		AmigaDebugLogf( "[Amiga] AUTO FIRST EngineTick after level tick" );
+	}
+#endif
 
 	// Handle server travelling.
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE EngineTick before server-travel" );
+#endif
 	guard(ServerTravel);
 	if( GLevel && *GLevel->GetLevelInfo()->NextURL )
 	{
@@ -1335,8 +1472,16 @@ void UGameEngine::Tick( FLOAT DeltaSeconds )
 		}
 	}
 	unguard;
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE EngineTick after server-travel" );
+#endif
 
 	// Handle client travelling.
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE EngineTick before client-travel" );
+#endif
 	guard(ClientTravel);
 	if( Client && Client->Viewports.Num() && Client->Viewports(0)->TravelURL!="" )
 	{
@@ -1348,8 +1493,16 @@ void UGameEngine::Tick( FLOAT DeltaSeconds )
 		return;
 	}
 	unguard;
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE EngineTick after client-travel" );
+#endif
 
 	// Update the pending level.
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE EngineTick before pending-level" );
+#endif
 	guard(TickPending);
 	if( GPendingLevel )
 	{
@@ -1395,6 +1548,10 @@ void UGameEngine::Tick( FLOAT DeltaSeconds )
 		}
 	}
 	unguard;
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+		AmigaDebugLogf( "[Amiga] AUTO TRACE EngineTick after pending-level" );
+#endif
 
 	// Render everything.
 	guard(ClientTick);
@@ -1405,9 +1562,23 @@ void UGameEngine::Tick( FLOAT DeltaSeconds )
 #endif
 	if( Client )
 	{
+#ifdef PLATFORM_AMIGA
+		if( GAmigaStartupTraceFrames > 0 )
+		{
+			debugf( NAME_Init, "FIRST: EngineTick before client tick" );
+			AmigaDebugLogf( "[Amiga] AUTO FIRST EngineTick before client tick" );
+		}
+#endif
 		uclock(LocalClientCycles);
 		Client->Tick();
 		uunclock(LocalClientCycles);
+#ifdef PLATFORM_AMIGA
+		if( GAmigaStartupTraceFrames > 0 )
+		{
+			debugf( NAME_Init, "FIRST: EngineTick after client tick" );
+			AmigaDebugLogf( "[Amiga] AUTO FIRST EngineTick after client tick" );
+		}
+#endif
 #ifdef PLATFORM_AMIGA
 		AmigaPerfClientEnd = SDL_GetTicks();
 #endif
@@ -1449,6 +1620,13 @@ void UGameEngine::Tick( FLOAT DeltaSeconds )
 	uunclock(LocalTickCycles);
 	TickCycles=LocalTickCycles;
 	GTicks++;
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+	{
+		debugf( NAME_Init, "FIRST: EngineTick leave" );
+		AmigaDebugLogf( "[Amiga] AUTO FIRST EngineTick leave" );
+	}
+#endif
 	unguard;
 }
 

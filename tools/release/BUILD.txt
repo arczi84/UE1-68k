@@ -1,0 +1,27 @@
+Unreal MiniGL release candidate - 2026-09-25
+
+Source: UE1-MiniGL working tree, not an exact historic tag.
+Compiler installation: /opt/amiga-gcc16-rc11
+Reported version: GCC 16.2.0b 20260825082934
+Note: the unchanged version stamp is older than the RC11 compiler payload.
+RC11 cc1plus SHA256:
+419d09823fd9070c9604bbe713fd781271e87a37dea8872be1024898f9bc06fd
+
+Reproduce:
+  bash tools/build-minigl-rc11-release.sh
+  bash tools/package-minigl-rc11-release.sh NEW_OUTPUT_DIRECTORY
+Build parallelism: -j16
+
+Release, effective O3, existing UnCorSc/UnProp per-file Og retained.
+-mcrt=nix20 -m68060 -mhard-float -fomit-frame-pointer -ffast-math
+-fno-PIC -fno-pic -fno-strict-aliasing -g0
+UE_DISABLE_RENDER_TIMING, UE_MINIGL_HASHCACHE, UE_MINIGL_READCACHE,
+UE_MINIGL_STABLE_BASELINE, UE_RELEASE_PACKAGE.
+Linker --strip-all; no profiling or capture. Exception handling retained.
+Original object/property ABI and error checks retained.
+SDK: PiStorm3D_v12 dispatch import library.
+
+Validation: HUNK has three segments and no HUNK_DEBUG/HUNK_SYMBOL records;
+read-cache, filtering menu and color-depth regression tests passed.
+Clean-install gameplay testing on physical PiStorm is still required.
+The package contains no original game data or graphics drivers.

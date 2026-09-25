@@ -21,7 +21,9 @@
 #include <exec/nodes.h>
 #include <devices/input.h>
 #include <devices/inputevent.h>
+#include <intuition/intuition.h>
 #include <proto/exec.h>
+#include <proto/intuition.h>
 
 #include <string.h>
 
@@ -43,6 +45,44 @@ static int                       s_installed;
 static int                       s_install_reported;
 
 extern void AmigaDebugLogf( const char* fmt, ... );
+extern unsigned long _sdl_windowaddr;
+
+/*
+ * SDL 1.2 does not expose window positioning, while the SDL2 compatibility
+ * layer receives SDL_WINDOWPOS_UNDEFINED.  Centre the real Intuition window
+ * after the viewport has finished its startup resize.  Using the outer window
+ * dimensions also accounts for the title bar and borders.
+ */
+void AmigaCenterIntuitionWindow( void* windowHandle )
+{
+	struct Window* window = (struct Window*)windowHandle;
+	struct Screen* screen;
+	LONG left;
+	LONG top;
+
+	if( !window || !(screen = window->WScreen) )
+		return;
+
+	left = ((LONG)screen->Width - (LONG)window->Width) / 2;
+	top = ((LONG)screen->Height - (LONG)window->Height) / 2;
+	if( left < 0 ) left = 0;
+	if( top < 0 ) top = 0;
+
+	if( left != window->LeftEdge || top != window->TopEdge )
+		ChangeWindowBox( window, left, top, window->Width, window->Height );
+}
+
+void AmigaCenterSDLWindow( void )
+{
+	AmigaCenterIntuitionWindow( (void*)_sdl_windowaddr );
+}
+
+void AmigaGetSDLWindowPosition( int* left, int* top )
+{
+	struct Window* window = (struct Window*)_sdl_windowaddr;
+	if( left ) *left = window ? window->LeftEdge : 0;
+	if( top )  *top  = window ? window->TopEdge  : 0;
+}
 
 /*
  * input.device calls stream handlers with the event list in A0 and is_Data
@@ -247,5 +287,12 @@ int AmigaRawMouseRead( int* dx, int* dy, unsigned int* pressed,
 	return 0;
 }
 void AmigaRawMouseShutdown( void ) {}
+void AmigaCenterIntuitionWindow( void* windowHandle ) { (void)windowHandle; }
+void AmigaCenterSDLWindow( void ) {}
+void AmigaGetSDLWindowPosition( int* left, int* top )
+{
+	if( left ) *left = 0;
+	if( top )  *top  = 0;
+}
 
 #endif

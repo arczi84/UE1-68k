@@ -16,6 +16,14 @@ extern "C" {HINSTANCE hInstance;}
 extern "C" {char GCC_HIDDEN THIS_PACKAGE[64]="Launch";}
 #ifdef PLATFORM_AMIGA
 extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+#ifdef AMIGA_USE_MINIGL
+extern "C" void AmigaCenterSDLWindow( void );
+#define AMIGA_UNREAL_INI "PROGDIR:Unreal-MiniGL.ini"
+#define AMIGA_UNREAL_INI_ARG "-INI=Unreal-MiniGL.ini"
+#else
+#define AMIGA_UNREAL_INI "PROGDIR:Unreal.ini"
+#define AMIGA_UNREAL_INI_ARG "-INI=Unreal.ini"
+#endif
 #ifdef UE_AMIGA_GPROF
 #include <unistd.h>
 // libnix does not select gcrt0.o for -pg, so its profiler must be started and
@@ -27,6 +35,8 @@ extern "C" void _moncleanup();
 // path is unreliable with this 68k soft-float runtime.
 FLOAT GAmigaFrameDeltaSeconds = 1.0f / 30.0f;
 DWORD GAmigaFrameSerial = 1;
+INT GAmigaStartupTraceFrames = 0;
+INT GAmigaMiniGLTraceFrames = 0;
 static INT GAmigaTimingTraceRemaining = 4;
 #endif
 
@@ -204,6 +214,8 @@ UEngine* InitEngine()
 	// Init engine.
 	UEngine* Engine = ConstructClassObject<UEngine>( EngineClass );
 	Engine->Init();
+	debugf( NAME_Init, "FIRST: Engine->Init returned" );
+	AmigaDebugLogf( "[Amiga] AUTO FIRST Engine->Init returned" );
 
 	return Engine;
 
@@ -220,10 +232,18 @@ void MainLoop( UEngine* Engine )
 
 	GIsRunning = 1;
 #ifdef PLATFORM_AMIGA
+	debugf( NAME_Init, "FIRST: MainLoop before initial SDL_GetTicks" );
+	AmigaDebugLogf( "[Amiga] AUTO FIRST MainLoop before initial SDL_GetTicks" );
 	DWORD AmigaOldTicks = SDL_GetTicks();
+	debugf( NAME_Init, "FIRST: MainLoop initial ticks=%lu", (unsigned long)AmigaOldTicks );
+	AmigaDebugLogf( "[Amiga] AUTO FIRST MainLoop initial ticks=%lu", (unsigned long)AmigaOldTicks );
 	DWORD AmigaFrameStart = AmigaOldTicks;
 	DWORD AmigaEngineMillis = 0;
 	INT AmigaFrameCount = 0;
+	// Isolation modes are meant to run at full speed.  The earlier per-frame
+	// console/file trace distorted timing badly on a real 68k machine.
+	GAmigaStartupTraceFrames = 0;
+	GAmigaMiniGLTraceFrames = 0;
 #else
 	DOUBLE OldTime = appSeconds();
 #endif
@@ -231,6 +251,8 @@ void MainLoop( UEngine* Engine )
 	{
 		// Update the world.
 #ifdef PLATFORM_AMIGA
+		if( GAmigaStartupTraceFrames > 0 )
+			AmigaDebugLogf( "[Amiga] AUTO TRACE frame=%lu phase=loop-start remaining=%d", (unsigned long)(GAmigaFrameSerial+1), GAmigaStartupTraceFrames );
 		const DWORD AmigaNewTicks = SDL_GetTicks();
 		const DWORD AmigaDeltaMillis = AmigaNewTicks - AmigaOldTicks;
 		AmigaOldTicks = AmigaNewTicks;
@@ -241,7 +263,17 @@ void MainLoop( UEngine* Engine )
 		// Normal frames are unchanged; only gaps above 100 ms are clamped.
 		GAmigaFrameDeltaSeconds = (FLOAT)Min<DWORD>(AmigaDeltaMillis, 100) * 0.001f;
 		++GAmigaFrameSerial;
+		if( GAmigaStartupTraceFrames > 0 )
+		{
+			debugf( NAME_Init, "FIRST: MainLoop before Engine->Tick delta_ms=%lu", (unsigned long)AmigaDeltaMillis );
+			AmigaDebugLogf( "[Amiga] AUTO FIRST MainLoop before Engine->Tick delta_ms=%lu", (unsigned long)AmigaDeltaMillis );
+		}
 		Engine->Tick( GAmigaFrameDeltaSeconds );
+		if( GAmigaStartupTraceFrames > 0 )
+		{
+			debugf( NAME_Init, "FIRST: MainLoop after Engine->Tick" );
+			AmigaDebugLogf( "[Amiga] AUTO FIRST MainLoop after Engine->Tick" );
+		}
 #else
 		DOUBLE NewTime = appSeconds();
 		Engine->Tick( NewTime - OldTime );
@@ -263,20 +295,41 @@ void MainLoop( UEngine* Engine )
 #endif
 
 		// Enforce optional maximum tick rate.
+#ifdef PLATFORM_AMIGA
+		if( GAmigaStartupTraceFrames > 0 )
+			AmigaDebugLogf( "[Amiga] AUTO TRACE frame=%lu phase=before-max-tick-rate", (unsigned long)GAmigaFrameSerial );
+#endif
 		INT MaxTickRate = Engine->GetMaxTickRate();
+#ifdef PLATFORM_AMIGA
+		if( GAmigaStartupTraceFrames > 0 )
+			AmigaDebugLogf( "[Amiga] AUTO TRACE frame=%lu phase=after-max-tick-rate value=%d", (unsigned long)GAmigaFrameSerial, MaxTickRate );
+#endif
 		if( MaxTickRate )
 		{
 #ifdef PLATFORM_AMIGA
 			const DWORD TargetMillis = 1000 / MaxTickRate;
 			const DWORD UsedMillis = SDL_GetTicks() - AmigaOldTicks;
 			if( UsedMillis < TargetMillis )
+			{
+				if( GAmigaStartupTraceFrames > 0 )
+					AmigaDebugLogf( "[Amiga] AUTO TRACE frame=%lu phase=before-delay ms=%lu", (unsigned long)GAmigaFrameSerial, (unsigned long)(TargetMillis-UsedMillis) );
 				SDL_Delay( TargetMillis - UsedMillis );
+				if( GAmigaStartupTraceFrames > 0 )
+					AmigaDebugLogf( "[Amiga] AUTO TRACE frame=%lu phase=after-delay", (unsigned long)GAmigaFrameSerial );
+			}
 #else
 			DOUBLE Delta = (1.0/MaxTickRate) - (appSeconds()-OldTime);
 			if( Delta > 0.0 )
 				appSleep( Delta );
 #endif
 		}
+#ifdef PLATFORM_AMIGA
+		if( GAmigaStartupTraceFrames > 0 )
+		{
+			AmigaDebugLogf( "[Amiga] AUTO TRACE frame=%lu phase=loop-end", (unsigned long)GAmigaFrameSerial );
+			--GAmigaStartupTraceFrames;
+		}
+#endif
 	}
 	GIsRunning = 0;
 	unguard;
@@ -327,13 +380,15 @@ static int GAmigaCtorsRun = 0; // diagnostic: how many ctors actually fired.
 // survive even when stderr goes to a console we can't capture. Opens/closes
 // Keep the normal 68k build quiet. Opening and closing this file for every
 // package, texture and input event makes map startup needlessly expensive on
-// an emulated Amiga disk. Only retain failures and the one-shot automatic
-// slow-frame report.
+// an emulated Amiga disk. Only retain failures; automatic debug traces are
+// disabled for the interactive MiniGL tests.
 extern "C" void AmigaDebugLog( const char* Msg )
 {
+#ifdef UE_RELEASE_PACKAGE
+	(void)Msg;
+#else
 	if
-	(	!strstr(Msg,"AUTO")
-	&&	!strstr(Msg,"FAIL")
+	(	!strstr(Msg,"FAIL")
 	&&	!strstr(Msg,"Error")
 	&&	!strstr(Msg,"ERROR")
 	&&	!strstr(Msg,"Critical")
@@ -341,27 +396,41 @@ extern "C" void AmigaDebugLog( const char* Msg )
 	&&	!strstr(Msg,"crash") )
 		return;
 
-	static FILE* F = NULL;
+	// Commit every diagnostic line to persistent storage immediately. Keeping
+	// the stream open loses the directory update when PiStorm locks the whole
+	// machine and the user must reset it.
+	FILE* F = fopen( "PROGDIR:unreal-first.log", "a" );
 	if( !F )
-		F = fopen( "PROGDIR:startup-debug.log", "w" );
+		F = fopen( "unreal-first.log", "a" );
+	if( !F )
+		F = fopen( "SYS:unreal-first.log", "a" );
 	if( F )
 	{
 		fputs( Msg, F );
 		fputc( '\n', F );
 		fflush( F );
+		fclose( F );
 	}
+	fputs( Msg, stderr );
+	fputc( '\n', stderr );
+	fflush( stderr );
+#endif
 }
 
 // printf-style variant used by the startup traces in other TUs.
 #include <stdarg.h>
 extern "C" void AmigaDebugLogf( const char* Fmt, ... )
 {
+#ifdef UE_RELEASE_PACKAGE
+	(void)Fmt;
+#else
 	char Buf[256];
 	va_list Args;
 	va_start( Args, Fmt );
 	vsnprintf( Buf, sizeof(Buf), Fmt, Args );
 	va_end( Args );
 	AmigaDebugLog( Buf );
+#endif
 }
 
 static void AmigaRunStaticCtors()
@@ -421,7 +490,7 @@ int main( int argc, const char** argv )
 	INT IniArgc = 1;
 	for( INT i=1; i<argc && IniArgc<(INT)ARRAY_COUNT(IniArgv)-1; ++i )
 		IniArgv[IniArgc++] = argv[i];
-	IniArgv[IniArgc++] = "-INI=Unreal.ini";
+	IniArgv[IniArgc++] = AMIGA_UNREAL_INI_ARG;
 	appSetCmdLine( IniArgc, IniArgv );
 #else
 	appSetCmdLine( argc, argv );
@@ -453,10 +522,19 @@ int main( int argc, const char** argv )
 #endif
 		// Start main loop.
 		GIsGuarded=1;
-		GSystem = &GTempPlatform;
-		UEngine* Engine = InitEngine();
-		if( !GIsRequestingExit )
-			MainLoop( Engine );
+			GSystem = &GTempPlatform;
+			UEngine* Engine = InitEngine();
+			debugf( NAME_Init, "FIRST: InitEngine returned requesting_exit=%d", (INT)GIsRequestingExit );
+			AmigaDebugLogf( "[Amiga] AUTO FIRST InitEngine returned requesting_exit=%d", (INT)GIsRequestingExit );
+			if( !GIsRequestingExit )
+			{
+				debugf( NAME_Init, "FIRST: before MainLoop" );
+				AmigaDebugLogf( "[Amiga] AUTO FIRST before MainLoop" );
+				MainLoop( Engine );
+			}
+#ifdef UE_AMIGA_GPROF
+		_moncleanup();
+#endif
 		ExitEngine( Engine );
 		GIsGuarded=0;
 #ifndef _DEBUG
@@ -470,6 +548,10 @@ int main( int argc, const char** argv )
 
 	// Shut down.
 	GExecHook=NULL;
+#ifdef UE_AMIGA_GPROF
+	// Save before UObject/renderer destruction, not only after it returns.
+	_moncleanup();
+#endif
 	appExit();
 	GIsStarted = 0;
 
@@ -489,15 +571,19 @@ int main( int argc, const char** argv )
 // deep recursion (GC, serialization) overflows it and corrupts globals. Run the
 // real entry point on a large exec-swapped stack. See AmigaStack.c.
 extern "C" int AmigaRunWithStack( int argc, const char** argv, int (*fn)( int, const char** ) );
+#ifndef AMIGA_USE_MINIGL
 // libGL.a registers this through the stock linker's CONSTRUCTORS directive.
 // Our custom ctor layout deliberately replaces that directive, so invoke the
 // library initializer explicitly before any GL trampoline uses glBase.
 extern "C" void INIT_8_OpenLibs();
 extern "C" void EXIT_8_OpenLibs();
+#endif
 // libnix's low-level process exit.  Unlike exit(), this does not walk the
 // stock C++ destructor list, which our custom constructor layout replaces.
 extern "C" void AmigaLowLevelExit( int Result ) __asm__("____exit");
+#ifndef AMIGA_USE_MINIGL
 extern "C" void* glBase;
+#endif
 
 // The SDL 1.2 backend has no hidden-window support: SDL_WINDOW_HIDDEN is
 // discarded by the compatibility shim.  The pre-stack AmigaMesa context must
@@ -509,7 +595,7 @@ static void AmigaReadEarlyViewportSize( int& Width, int& Height )
 	Width = 640;
 	Height = 480;
 
-	FILE* Ini = fopen( "PROGDIR:Unreal.ini", "r" );
+	FILE* Ini = fopen( AMIGA_UNREAL_INI, "r" );
 	if( !Ini )
 		return;
 
@@ -543,7 +629,7 @@ static void AmigaReadEarlyViewportSize( int& Width, int& Height )
 static int AmigaReadEarlyUseOpenGL()
 {
 	int UseOpenGL = 1;
-	FILE* Ini = fopen( "PROGDIR:Unreal.ini", "r" );
+	FILE* Ini = fopen( AMIGA_UNREAL_INI, "r" );
 	if( !Ini )
 		return UseOpenGL;
 
@@ -574,7 +660,7 @@ static int AmigaReadEarlyUseOpenGL()
 static int AmigaReadEarlyFullscreen()
 {
 	int Fullscreen = 0;
-	FILE* Ini = fopen( "PROGDIR:Unreal.ini", "r" );
+	FILE* Ini = fopen( AMIGA_UNREAL_INI, "r" );
 	if( !Ini )
 		return Fullscreen;
 
@@ -612,7 +698,9 @@ int main( int argc, const char** argv )
 	_monstartup();
 #endif
 
+#ifndef UE_RELEASE_PACKAGE
 	{ FILE* F=fopen("PROGDIR:startup-debug.log","w"); if(F) fclose(F); }
+	{ FILE* F=fopen("PROGDIR:unreal-first.log","w"); if(F) fclose(F); }
 
 	// One-shot: does C++ exception unwinding actually work under libnix/68k?
 	// The engine relies on throw/catch (appError → main's catch). If this
@@ -626,14 +714,18 @@ int main( int argc, const char** argv )
 		catch( ... )     { if(f) fprintf( f, "CAUGHT ... (stage=%d)\n", stage ); }
 		if(f){ fprintf(f,"after try, ok\n"); fclose(f); }
 	}
+#endif
 
+#ifndef AMIGA_USE_NATIVE_MINIGL
 	GAmigaUseOpenGL = AmigaReadEarlyUseOpenGL();
+#ifndef AMIGA_USE_MINIGL
 	if( GAmigaUseOpenGL )
 	{
 		AmigaDebugLogf( "[Amiga] PreStack GL: glBase before init=%p", glBase );
 		INIT_8_OpenLibs();
 		AmigaDebugLogf( "[Amiga] PreStack GL: glBase after init=%p", glBase );
 	}
+#endif
 
 	// Create the selected SDL surface on the original process stack. OpenGL
 	// gets its AmigaMesa context early; Software gets a writable RGB565 surface.
@@ -657,20 +749,35 @@ int main( int argc, const char** argv )
 			(GAmigaUseOpenGL ? SDL_WINDOW_OPENGL : 0)
 				| (EarlyFullscreen ? SDL_WINDOW_FULLSCREEN : 0)
 				| SDL_WINDOW_HIDDEN );
+#ifdef AMIGA_USE_MINIGL
+		if( EarlyWindow && !EarlyFullscreen )
+			AmigaCenterSDLWindow();
+#endif
 		AmigaDebugLogf( "[Amiga] PreStack: renderer=%s fullscreen=%d window=%p error='%s'",
-			GAmigaUseOpenGL ? "OpenGL" : "Software", EarlyFullscreen,
+			GAmigaUseOpenGL ?
+#ifdef AMIGA_USE_MINIGL
+				"MiniGL"
+#else
+				"OpenGL"
+#endif
+				: "Software", EarlyFullscreen,
 			(void*)EarlyWindow, SDL_GetError() );
 	}
 	else
 	{
 		AmigaDebugLogf( "[Amiga] PreStack: SDL_Init failed: %s", SDL_GetError() );
 	}
+#else
+	AmigaDebugLog( "[Amiga] Native MiniGL: SDL window/context bootstrap bypassed" );
+#endif
 	const int Result = AmigaRunWithStack( argc, argv, &UnrealMain );
+#ifndef AMIGA_USE_MINIGL
 	if( GAmigaUseOpenGL )
 	{
 		AmigaDebugLog( "[Amiga] main: engine exited; closing GL libraries" );
 		EXIT_8_OpenLibs();
 	}
+#endif
 #ifdef UE_AMIGA_GPROF
 	// AmigaLowLevelExit deliberately bypasses exit()/atexit(), so flush here.
 	// Make the otherwise relative "gmon.out" name deterministic.

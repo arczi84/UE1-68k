@@ -1,0 +1,3 @@
+; Run with Execute Start-Unreal from the game's System drawer.
+Stack 1048576
+Unreal-MiniGL -INI=Unreal-MiniGL.ini

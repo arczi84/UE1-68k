@@ -1,0 +1,23 @@
+Unreal MiniGL - restored hardware-tested readcache binary
+
+This package uses the EXACT last-working Unreal-MGL-gcc65-readcache
+executable, renamed Unreal-MiniGL. It is NOT a new compilation.
+Original build directory: build/gcc65-minigl-o3-readcache
+Original compiler version: GCC 6.5.0b 250215183648
+SHA256 of the executable:
+4c3303c3710d1c24bb89200a4c8299b541c15b9b40d2d5a15f9b6d4efef966f8
+
+The later GCC 6.5.0b 20260819091705 release build was withdrawn after
+NewSize>=0 failed during Entry loading. Do not use it as a release baseline.
+Do not rebuild the preserved readcache directory with the current compiler.
+
+Original flags: -noixemul -m68060 -mhard-float -fomit-frame-pointer
+-ffast-math -fno-PIC -fno-pic, effective O3, -fno-strict-aliasing.
+Existing per-file optimization exceptions retained.
+UE_DISABLE_RENDER_TIMING, UE_MINIGL_HASHCACHE, UE_MINIGL_READCACHE.
+No profiling or allocation diagnostics; render-test options still exist
+but are not selected by the supplied launcher. No new release-only changes.
+
+Full installation INI retained with only AutoTimedemo changed to False.
+No original game data or graphics drivers included.
+Exact-source/toolchain recovery for a fresh release rebuild remains pending.

@@ -3,18 +3,40 @@
 
 #include "NSDLDrv.h"
 #include "UnRender.h"
+#ifdef AMIGA_USE_NATIVE_MINIGL
+#include "AmigaMiniGLWindow.h"
+#endif
 
 #ifdef PLATFORM_AMIGA
 extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+extern INT GAmigaStartupTraceFrames;
+extern INT GAmigaMiniGLTraceFrames;
+extern DWORD GAmigaFrameSerial;
 extern "C" int AmigaRawMouseSetCapture( int Enabled );
 extern "C" int AmigaRawMouseRead( int* DX, int* DY, unsigned int* Pressed,
 	unsigned int* Released, unsigned int* Held );
+#if defined(NSDLDRV_USE_MINIGL) && !defined(AMIGA_USE_NATIVE_MINIGL)
+extern "C" void AmigaCenterSDLWindow( void );
+#endif
 #define AMIGA_VIEW_LOG(...) AmigaDebugLogf( "[Amiga] Viewport: " __VA_ARGS__ )
 #else
 #define AMIGA_VIEW_LOG(...)
 #endif
 
 IMPLEMENT_CLASS( UNSDLViewport );
+
+#ifdef AMIGA_USE_NATIVE_MINIGL
+static INT OpenNativeMiniGLWindow( INT Width, INT Height, UBOOL Fullscreen )
+{
+	INT ColorBits = 16; // Preserve the previous hard-coded request.
+	Parse( appCmdLine(), "MGLBPP=", ColorBits );
+	if( ColorBits!=16 && ColorBits!=32 )
+		appErrorf( "Invalid -mglbpp=%i: use 16 or 32", ColorBits );
+	debugf( NAME_Log, "MiniGL: requested color depth=%i, fullscreen=%i (actual format is backend-dependent)",
+		ColorBits, (INT)Fullscreen );
+	return AmigaMiniGLOpenWindow( Width, Height, Fullscreen ? 1 : 0, ColorBits );
+}
+#endif
 
 /*-----------------------------------------------------------------------------
 	UNSDLViewport implementation.
@@ -201,6 +223,9 @@ UNSDLViewport::UNSDLViewport( ULevel* InLevel, UNSDLClient* InClient )
 
 	Destroyed = false;
 	QuitRequested = false;
+	NativeMiniGL = false;
+	NativeMiniGLFullscreen = false;
+	MouseCaptured = false;
 
 	unguard;
 }
@@ -209,6 +234,18 @@ UNSDLViewport::UNSDLViewport( ULevel* InLevel, UNSDLClient* InClient )
 void UNSDLViewport::Destroy()
 {
 	guard(UNSDLViewport::Destroy);
+#ifdef AMIGA_USE_NATIVE_MINIGL
+	// UViewport::Destroy closes the platform window before it shuts down the
+	// renderer. Native MiniGL cannot survive that order: Flush still calls GL
+	// while the context and dispatch library would already be gone.
+	if( NativeMiniGL && RenDev )
+	{
+		debugf( NAME_Exit, "Shutting down native MiniGL renderer before context" );
+		RenDev->Exit();
+		delete RenDev;
+		RenDev = NULL;
+	}
+#endif
 	if( Client->FullscreenViewport == this )
 	{
 		Client->FullscreenViewport = NULL;
@@ -262,7 +299,12 @@ void UNSDLViewport::UpdateWindow()
 			strcat( WindowName, " *" );
 	}
 #endif
-	SDL_SetWindowTitle( hWnd, WindowName );
+#ifdef AMIGA_USE_NATIVE_MINIGL
+	if( NativeMiniGL )
+		AmigaMiniGLSetTitle( WindowName );
+	else
+#endif
+		SDL_SetWindowTitle( hWnd, WindowName );
 
 	unguard;
 }
@@ -291,7 +333,8 @@ void UNSDLViewport::OpenWindow( void* InParentWindow, UBOOL Temporary, INT NewX,
 #ifdef PLATFORM_AMIGA
 		// The Amiga build has one runtime-selectable renderer setting for both
 		// windowed and fullscreen modes.
-		DoOpenGL = appStrstr( Temp, "OPENGL" ) != NULL;
+		DoOpenGL = appStrstr( Temp, "OPENGL" ) != NULL
+			|| appStrstr( Temp, "MINIGL" ) != NULL;
 #else
 		if( !appStrstr( Temp, "OPENGL" ) )
 		{
@@ -327,6 +370,51 @@ void UNSDLViewport::OpenWindow( void* InParentWindow, UBOOL Temporary, INT NewX,
 	}
 	else
 	{
+#ifdef AMIGA_USE_NATIVE_MINIGL
+		// Renderer changes must also preserve the GL-before-window destruction
+		// order. This supports the existing MiniGL/SoftDrv menu without ever
+		// handing an Intuition Window pointer to SDL's video functions.
+		if( hWnd && NativeMiniGL != !!DoOpenGL )
+		{
+			if( RenDev )
+			{
+				RenDev->Exit();
+				delete RenDev;
+				RenDev = NULL;
+			}
+			CloseWindow();
+		}
+		if( DoOpenGL )
+		{
+			const UBOOL StartFullscreen = Client->StartupFullscreen;
+			if( !hWnd )
+			{
+				AMIGA_VIEW_LOG( "before native MiniGL window %dx%d fullscreen=%d",
+					NewX, NewY, (INT)StartFullscreen );
+				if( !OpenNativeMiniGLWindow( NewX, NewY, StartFullscreen ) )
+					appErrorf( "Could not create native MiniGL window/context: %s", AmigaMiniGLGetOpenError() );
+				NativeMiniGL = true;
+				NativeMiniGLFullscreen = StartFullscreen;
+				hWnd = (SDL_Window*)AmigaMiniGLGetWindow();
+				GLCtx = (SDL_GLContext)1;
+				SavedX = NewX;
+				SavedY = NewY;
+				DoSetActive = DoRepaint = 1;
+				if( StartFullscreen )
+					Client->FullscreenViewport = this;
+				debugf( NAME_Log, "Opened native MiniGL viewport" );
+			}
+			else if( SizeX != NewX || SizeY != NewY )
+			{
+				RecreateNativeMiniGL( NewX, NewY, NativeMiniGLFullscreen );
+			}
+			DisplayIndex = Client->DefaultDisplay;
+			DisplaySize.w = Client->GetDefaultDisplayMode().w;
+			DisplaySize.h = Client->GetDefaultDisplayMode().h;
+		}
+		else
+#endif
+		{
 		// Get flags.
 		DWORD Flags = 0;
 		if( InParentWindow && (Actor->ShowFlags & SHOW_ChildWindow) )
@@ -472,6 +560,7 @@ void UNSDLViewport::OpenWindow( void* InParentWindow, UBOOL Temporary, INT NewX,
 			DisplaySize.w = DisplayMode.w;
 			DisplaySize.h = DisplayMode.h;
 		}
+		}
 	}
 
 	SizeX = NewX;
@@ -502,6 +591,13 @@ void UNSDLViewport::OpenWindow( void* InParentWindow, UBOOL Temporary, INT NewX,
 	// unlimited relative mouse movement.
 	if( !Temporary && !GIsEditor && Client->CaptureMouse )
 		SetMouseCapture( 1, 1, 0 );
+#if defined(NSDLDRV_USE_MINIGL) && !defined(AMIGA_USE_NATIVE_MINIGL)
+	// Caption setup, viewport adoption and input grabbing happen after the
+	// pre-stack centering. Centre once more at the end of that sequence so no
+	// intermediate SDL/Intuition operation leaves the window displaced.
+	if( !Temporary && hWnd && !(SDL_GetWindowFlags(hWnd) & SDL_WINDOW_FULLSCREEN) )
+		AmigaCenterSDLWindow();
+#endif
 #endif
 
 	unguard;
@@ -518,6 +614,19 @@ void UNSDLViewport::CloseWindow()
 
 	if( hWnd )
 	{
+#ifdef AMIGA_USE_NATIVE_MINIGL
+		if( NativeMiniGL )
+		{
+			AmigaRawMouseSetCapture( 0 );
+			AmigaMiniGLCloseWindow();
+			hWnd = NULL;
+			GLCtx = NULL;
+			NativeMiniGL = false;
+			NativeMiniGLFullscreen = false;
+			MouseCaptured = false;
+			return;
+		}
+#endif
 		if( SDLTex )
 		{
 			SDL_DestroyTexture( SDLTex );
@@ -576,7 +685,15 @@ UBOOL UNSDLViewport::Lock( FPlane FlashScale, FPlane FlashFog, FPlane ScreenClea
 	// Success.
 	uunclock(Client->DrawCycles);
 
-	return UViewport::Lock( FlashScale, FlashFog, ScreenClear, RenderLockFlags, HitData, HitSize );
+#ifdef AMIGA_USE_NATIVE_MINIGL
+	if( NativeMiniGL && !AmigaMiniGLBeginFrame() )
+		return 0;
+#endif
+	const UBOOL Locked = UViewport::Lock( FlashScale, FlashFog, ScreenClear, RenderLockFlags, HitData, HitSize );
+#ifdef AMIGA_USE_NATIVE_MINIGL
+	if( NativeMiniGL && !Locked ) AmigaMiniGLEndFrame();
+#endif
+	return Locked;
 
 	unguard;
 }
@@ -587,12 +704,23 @@ UBOOL UNSDLViewport::Lock( FPlane FlashScale, FPlane FlashFog, FPlane ScreenClea
 void UNSDLViewport::Unlock( UBOOL Blit )
 {
 	guard(UNSDLViewport::Unlock);
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+	{
+		debugf( NAME_Init, "FIRST: Viewport Unlock enter blit=%d native=%d", (INT)Blit, (INT)NativeMiniGL );
+		AmigaDebugLogf( "[Amiga] AUTO FIRST Viewport Unlock enter blit=%d native=%d", (INT)Blit, (INT)NativeMiniGL );
+	}
+#endif
 
 	Client->DrawCycles=0;
 	uclock(Client->DrawCycles);
 
 	// Unlock base.
 	UViewport::Unlock( Blit );
+#ifdef AMIGA_USE_NATIVE_MINIGL
+	// Release even when Blit is false; the renderer has already flushed.
+	if( NativeMiniGL ) AmigaMiniGLEndFrame();
+#endif
 
 	// Blit, if desired.
 	if( Blit && hWnd && !OnHold )
@@ -600,7 +728,32 @@ void UNSDLViewport::Unlock( UBOOL Blit )
 		if( GLCtx )
 		{
 			// Flip OpenGL buffers.
-			SDL_GL_SwapWindow( hWnd );
+#ifdef AMIGA_USE_NATIVE_MINIGL
+			if( NativeMiniGL )
+			{
+#ifdef PLATFORM_AMIGA
+				if( GAmigaMiniGLTraceFrames > 0 )
+					AmigaDebugLogf( "[Amiga] AUTO MGL frame=%lu phase=before-mglSwitchDisplay", (unsigned long)GAmigaFrameSerial );
+#endif
+#ifdef PLATFORM_AMIGA
+				if( GAmigaStartupTraceFrames > 0 )
+				{
+					debugf( NAME_Init, "FIRST: Viewport Unlock before native swap" );
+					AmigaDebugLogf( "[Amiga] AUTO FIRST Viewport Unlock before native swap" );
+				}
+#endif
+				AmigaMiniGLSwapBuffers();
+#ifdef PLATFORM_AMIGA
+				if( GAmigaMiniGLTraceFrames > 0 )
+				{
+					AmigaDebugLogf( "[Amiga] AUTO MGL frame=%lu phase=after-mglSwitchDisplay", (unsigned long)GAmigaFrameSerial );
+					--GAmigaMiniGLTraceFrames;
+				}
+#endif
+			}
+			else
+#endif
+				SDL_GL_SwapWindow( hWnd );
 		}
 		else if( SDLRen && SDLTex )
 		{
@@ -610,6 +763,14 @@ void UNSDLViewport::Unlock( UBOOL Blit )
 			SDL_RenderPresent( SDLRen );
 		}
 	}
+
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+	{
+		debugf( NAME_Init, "FIRST: Viewport Unlock after swap" );
+		AmigaDebugLogf( "[Amiga] AUTO FIRST Viewport Unlock after swap" );
+	}
+#endif
 
 	uunclock(Client->DrawCycles);
 
@@ -633,7 +794,11 @@ void UNSDLViewport::MakeCurrent()
 			OldViewport->UpdateWindow();
 		}
 	}
-	if( GLCtx )
+	if( GLCtx
+#ifdef AMIGA_USE_NATIVE_MINIGL
+		&& !NativeMiniGL
+#endif
+	)
 	{
 		SDL_GL_MakeCurrent( hWnd, GLCtx );
 	}
@@ -647,8 +812,22 @@ void UNSDLViewport::MakeCurrent()
 void UNSDLViewport::Repaint()
 {
 	guard(UNSDLViewport::Repaint);
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+	{
+		debugf( NAME_Init, "FIRST: Repaint before Engine->Draw" );
+		AmigaDebugLogf( "[Amiga] AUTO FIRST Repaint before Engine->Draw" );
+	}
+#endif
 	if( !OnHold && RenDev && SizeX && SizeY )
 		Client->Engine->Draw( this, 0 );
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+	{
+		debugf( NAME_Init, "FIRST: Repaint after Engine->Draw" );
+		AmigaDebugLogf( "[Amiga] AUTO FIRST Repaint after Engine->Draw" );
+	}
+#endif
 	unguard;
 }
 
@@ -661,7 +840,16 @@ void UNSDLViewport::SetClientSize( INT NewX, INT NewY, UBOOL UpdateProfile )
 
 	if( hWnd )
 	{
-		SDL_SetWindowSize( hWnd, NewX, NewY );
+#ifdef AMIGA_USE_NATIVE_MINIGL
+		if( NativeMiniGL )
+		{
+			if( SizeX != NewX || SizeY != NewY )
+				RecreateNativeMiniGL( NewX, NewY, NativeMiniGLFullscreen );
+		}
+		else
+#endif
+		{
+			SDL_SetWindowSize( hWnd, NewX, NewY );
 		// Resize output texture if required.
 		if( SDLRen && SDLTex )
 		{
@@ -671,6 +859,7 @@ void UNSDLViewport::SetClientSize( INT NewX, INT NewY, UBOOL UpdateProfile )
 			{
 				appErrorf( "Could not create framebuffer texture: %s", SDL_GetError() );
 			}
+		}
 		}
 	}
 
@@ -688,6 +877,38 @@ void UNSDLViewport::SetClientSize( INT NewX, INT NewY, UBOOL UpdateProfile )
 	unguard;
 }
 
+#ifdef AMIGA_USE_NATIVE_MINIGL
+void UNSDLViewport::RecreateNativeMiniGL( INT NewX, INT NewY, UBOOL Fullscreen )
+{
+	guard(UNSDLViewport::RecreateNativeMiniGL);
+
+	const UBOOL HadRenderDevice = RenDev != NULL;
+	const UBOOL WasCaptured = MouseCaptured;
+	if( HadRenderDevice )
+		RenDev->Exit();
+
+	AmigaMiniGLCloseWindow();
+	hWnd = NULL;
+	GLCtx = NULL;
+	if( !OpenNativeMiniGLWindow( NewX, NewY, Fullscreen ) )
+		appErrorf( "Could not recreate native MiniGL window/context at %dx%d", NewX, NewY );
+
+	hWnd = (SDL_Window*)AmigaMiniGLGetWindow();
+	GLCtx = (SDL_GLContext)1;
+	NativeMiniGL = true;
+	NativeMiniGLFullscreen = Fullscreen;
+	SizeX = NewX;
+	SizeY = NewY;
+	if( HadRenderDevice && !RenDev->Init( this ) )
+		appErrorf( "Could not reinitialize MiniGL renderer after mode change" );
+	if( WasCaptured )
+		AmigaMiniGLSetPointerVisible( 0 );
+	UpdateWindow();
+
+	unguard;
+}
+#endif
+
 //
 // Return the viewport's window.
 //
@@ -704,6 +925,37 @@ void* UNSDLViewport::GetWindow()
 void UNSDLViewport::MakeFullscreen( INT NewX, INT NewY, UBOOL UpdateProfile )
 {
 	guard(UNSDLViewport::MakeFullscreen);
+
+#ifdef AMIGA_USE_NATIVE_MINIGL
+	if( NativeMiniGL )
+	{
+		if( Client->FullscreenViewport && Client->FullscreenViewport != this )
+			Client->EndFullscreen();
+		if( Client->FullscreenViewport != this )
+		{
+			SavedX = SizeX;
+			SavedY = SizeY;
+		}
+		RecreateNativeMiniGL( NewX, NewY, true );
+		Client->FullscreenViewport = this;
+		if( UpdateProfile )
+		{
+			Client->ViewportX = NewX;
+			Client->ViewportY = NewY;
+			Client->StartupFullscreen = 1;
+			Client->SaveConfig();
+		}
+		// Avoid reporting the menu click which selected fullscreen again through
+		// input.device. Gameplay capture resumes automatically in TickInput.
+		const UBOOL bIsInUI = Console &&
+			((UObject*)Console)->GetMainFrame() &&
+			((UObject*)Console)->GetMainFrame()->StateNode &&
+			((UObject*)Console)->GetMainFrame()->StateNode->GetFName() == "Menuing";
+		if( !bIsInUI )
+			SetMouseCapture( 1, 1, 0 );
+		return;
+	}
+#endif
 
 	// If another viewport is fullscreen, stop it.  When this viewport merely
 	// changes fullscreen resolution, keep it fullscreen: leaving first would
@@ -737,10 +989,24 @@ void UNSDLViewport::MakeFullscreen( INT NewX, INT NewY, UBOOL UpdateProfile )
 	{
 		Client->ViewportX = NewX;
 		Client->ViewportY = NewY;
+		Client->StartupFullscreen = 1;
 		Client->SaveConfig();
 	}
 
+#ifdef NSDLDRV_USE_MINIGL
+	// Do not start raw mouse capture while a menu click is still being
+	// processed.  On Amiga that would report the same physical button press a
+	// second time through input.device and immediately undo this fullscreen
+	// toggle.  TickInput restores capture automatically after leaving the UI.
+	const UBOOL bIsInUI = Console &&
+		((UObject*)Console)->GetMainFrame() &&
+		((UObject*)Console)->GetMainFrame()->StateNode &&
+		((UObject*)Console)->GetMainFrame()->StateNode->GetFName() == "Menuing";
+	if( !bIsInUI )
+		SetMouseCapture(1, 1, 0);
+#else
 	SetMouseCapture(1, 1, 0);
+#endif
 
 	unguard;
 }
@@ -751,6 +1017,14 @@ void UNSDLViewport::MakeFullscreen( INT NewX, INT NewY, UBOOL UpdateProfile )
 void UNSDLViewport::EndFullscreen()
 {
 	guard(UNSDLViewport::EndFullscreen);
+
+#ifdef AMIGA_USE_NATIVE_MINIGL
+	if( NativeMiniGL )
+	{
+		RecreateNativeMiniGL( SavedX, SavedY, false );
+		return;
+	}
+#endif
 
 	SDL_SetWindowFullscreen( hWnd, 0 );
 	SetClientSize( SavedX, SavedY, false );
@@ -782,30 +1056,56 @@ void UNSDLViewport::SetMouseCapture( UBOOL Capture, UBOOL Clip, UBOOL OnlyFocus 
 
 	// If only focus, reject.
 	if( OnlyFocus )
-		if( hWnd != SDL_GetMouseFocus() )
+		if(
+#ifdef AMIGA_USE_NATIVE_MINIGL
+			( NativeMiniGL && !AmigaMiniGLHasFocus() ) ||
+			( !NativeMiniGL &&
+#endif
+			hWnd != SDL_GetMouseFocus()
+#ifdef AMIGA_USE_NATIVE_MINIGL
+			)
+#endif
+		)
 			return;
 
 	// If capturing, windows requires clipping in order to keep focus.
 	Clip |= Capture;
 
-	// Handle capturing.
-	SDL_SetRelativeMouseMode( (SDL_bool)Capture );
+	// A native MiniGL window has no SDL video surface to grab. Keep its capture
+	// state locally while input.device supplies the relative mouse deltas.
+	MouseCaptured = Capture;
+#ifdef AMIGA_USE_NATIVE_MINIGL
+	if( !NativeMiniGL )
+#endif
+		SDL_SetRelativeMouseMode( (SDL_bool)Capture );
 #ifdef PLATFORM_AMIGA
 	// UE1 releases relative mode while paused or in a menu.  The SDL 1.2
 	// compatibility call also shows and ungrabs the Workbench pointer, which
 	// leaves it visible over the menu and lets clicks escape the game window.
 	// Keep the OS pointer hidden and confined while our window still owns the
 	// keyboard focus; raw relative input itself remains disabled below.
-	if( !Capture && hWnd && SDL_GetKeyboardFocus() == hWnd )
+	if( !Capture && hWnd
+#ifdef AMIGA_USE_NATIVE_MINIGL
+		&& !NativeMiniGL
+#endif
+		&& SDL_GetKeyboardFocus() == hWnd )
 	{
 		SDL_WM_GrabInput( SDL_GRAB_ON );
 		SDL_ShowCursor( SDL_DISABLE );
 	}
+#ifdef AMIGA_USE_NATIVE_MINIGL
+	if( NativeMiniGL )
+		AmigaMiniGLSetPointerVisible( Capture ? 0 : 1 );
+#endif
 	// SDL's amiga_WarpWMCursor() is empty in this SDL 1.2 build. Keep SDL's
 	// grab/cursor handling, but obtain unlimited relative deltas directly from
 	// one input.device stream handler.
 	AmigaRawMouseSetCapture( Capture ? 1 : 0 );
-	if( Capture && SizeX > 0 && SizeY > 0 )
+	if( Capture && SizeX > 0 && SizeY > 0
+#ifdef AMIGA_USE_NATIVE_MINIGL
+		&& !NativeMiniGL
+#endif
+	)
 		SDL_WarpMouse( SizeX / 2, SizeY / 2 );
 #endif
 
@@ -833,6 +1133,7 @@ UBOOL UNSDLViewport::TickInput()
 	INT Tmp;
 	const FLOAT CurTime = appSeconds();
 	const FLOAT DeltaTime = CurTime - InputUpdateTime;
+	UBOOL bMouseCaptured = SDL_GetRelativeMouseMode() != SDL_FALSE;
 
 #ifdef PLATFORM_AMIGA
 	INT CapturedMouseDX = 0;
@@ -847,25 +1148,47 @@ UBOOL UNSDLViewport::TickInput()
 		((UObject*)Console)->GetMainFrame() &&
 		((UObject*)Console)->GetMainFrame()->StateNode &&
 		((UObject*)Console)->GetMainFrame()->StateNode->GetFName() == "Menuing";
-	const UBOOL bHasInputFocus = hWnd && SDL_GetKeyboardFocus() == hWnd;
-	if( SDL_GetRelativeMouseMode() && (GIsEditor || bIsInUI || !bHasInputFocus) )
+	const UBOOL bHasInputFocus = hWnd &&
+#ifdef AMIGA_USE_NATIVE_MINIGL
+		( NativeMiniGL ? AmigaMiniGLHasFocus() : SDL_GetKeyboardFocus() == hWnd );
+#else
+		SDL_GetKeyboardFocus() == hWnd;
+#endif
+	bMouseCaptured =
+#ifdef AMIGA_USE_NATIVE_MINIGL
+		NativeMiniGL ? MouseCaptured :
+#endif
+		SDL_GetRelativeMouseMode() != SDL_FALSE;
+	if( bMouseCaptured && (GIsEditor || bIsInUI || !bHasInputFocus) )
+	{
 		SetMouseCapture( 0, 0, 0 );
-	else if( SDL_GetRelativeMouseMode() == SDL_FALSE && !GIsEditor &&
+		bMouseCaptured = false;
+	}
+	else if( !bMouseCaptured && !GIsEditor &&
 		!bIsInUI && bHasInputFocus && Client->CaptureMouse )
 	{
 		// Loading a save closes the menu but does not generate a mouse click.
 		// Restore gameplay capture as soon as the viewport becomes active again.
 		SetMouseCapture( 1, 1, 0 );
+		bMouseCaptured = true;
 	}
 #endif
 
-	while( SDL_PollEvent( &Ev ) )
+	while(
+#ifdef AMIGA_USE_NATIVE_MINIGL
+		( NativeMiniGL && AmigaMiniGLPollEvent( &Ev ) ) ||
+#endif
+		SDL_PollEvent( &Ev ) )
 	{
 		switch( Ev.type )
 		{
 			case SDL_QUIT:
 #ifdef PLATFORM_AMIGA
-				if( IgnoreQuitAfterEscapeUntil &&
+				if(
+#ifdef AMIGA_USE_NATIVE_MINIGL
+					!NativeMiniGL &&
+#endif
+					IgnoreQuitAfterEscapeUntil &&
 					(INT)(IgnoreQuitAfterEscapeUntil - SDL_GetTicks()) >= 0 )
 				{
 					IgnoreQuitAfterEscapeUntil = 0;
@@ -888,7 +1211,11 @@ UBOOL UNSDLViewport::TickInput()
 #endif
 			case SDL_KEYDOWN:
 #ifdef PLATFORM_AMIGA
-				if( Ev.key.keysym.sym == SDLK_ESCAPE )
+				if(
+#ifdef AMIGA_USE_NATIVE_MINIGL
+					!NativeMiniGL &&
+#endif
+					Ev.key.keysym.sym == SDLK_ESCAPE )
 					IgnoreQuitAfterEscapeUntil = SDL_GetTicks() + 500;
 #endif
 				if( Ev.key.keysym.sym == SDLK_RETURN && (Ev.key.keysym.mod & KMOD_ALT) )
@@ -930,8 +1257,11 @@ UBOOL UNSDLViewport::TickInput()
 				// grabbed. A click inside the gameplay viewport is the explicit
 				// request to capture and hide the pointer.
 				if( Ev.type == SDL_MOUSEBUTTONDOWN && !GIsEditor && !bIsInUI &&
-					SDL_GetRelativeMouseMode() == SDL_FALSE )
+					!bMouseCaptured )
+				{
 					SetMouseCapture( 1, 1, 0 );
+					bMouseCaptured = true;
+				}
 #endif
 				CauseInputEvent( MouseButtonMap[Ev.button.button], ( Ev.type == SDL_MOUSEBUTTONDOWN ) ? IST_Press : IST_Release );
 				break;
@@ -1035,7 +1365,7 @@ UBOOL UNSDLViewport::TickInput()
 #endif // !PLATFORM_SDL12_COMPAT (SDL 1.2 has no wheel/gamecontroller events)
 			case SDL_MOUSEMOTION:
 #ifdef PLATFORM_AMIGA
-				if( SDL_GetRelativeMouseMode() )
+				if( bMouseCaptured )
 				{
 					// Keep SDL deltas as a fallback in case input.device could
 					// not be installed on this particular system.
@@ -1044,7 +1374,7 @@ UBOOL UNSDLViewport::TickInput()
 					break;
 				}
 #endif
-				if( !Client->FullscreenViewport && !SDL_GetRelativeMouseMode() )
+				if( !Client->FullscreenViewport && !bMouseCaptured )
 				{
 					// If cursor isn't captured, just do MousePosition.
 					Client->Engine->MousePosition( this, 0, Ev.motion.x, Ev.motion.y );
@@ -1073,7 +1403,7 @@ UBOOL UNSDLViewport::TickInput()
 #ifdef PLATFORM_AMIGA
 	// input.device supplies physical relative deltas even after Intuition's
 	// pointer has reached a window or screen edge; no cursor warp is needed.
-	if( SDL_GetRelativeMouseMode() )
+	if( bMouseCaptured )
 	{
 		INT RawMouseDX = 0;
 		INT RawMouseDY = 0;
@@ -1103,7 +1433,10 @@ UBOOL UNSDLViewport::TickInput()
 			Client->Engine->MouseDelta( this, ViewportButtonFlags, RawMouseDX, RawMouseDY );
 			if( RawMouseDX ) CauseInputEvent( IK_MouseX, IST_Axis, RawMouseDX );
 			if( RawMouseDY ) CauseInputEvent( IK_MouseY, IST_Axis, RawMouseDY );
-			SDL_WarpMouse( SizeX / 2, SizeY / 2 );
+#ifdef AMIGA_USE_NATIVE_MINIGL
+			if( !NativeMiniGL )
+#endif
+				SDL_WarpMouse( SizeX / 2, SizeY / 2 );
 		}
 	}
 #endif
@@ -1156,7 +1489,11 @@ UBOOL UNSDLViewport::Exec( const char* Cmd, FOutputDevice* Out )
 		const char* RenderClass =
 			ParseCommand( &RenderCmd, "Software" )
 			? "SoftDrv.SoftwareRenderDevice"
+		#ifdef NSDLDRV_USE_MINIGL
+			: "NMiniGLDrv.NMiniGLRenderDevice";
+		#else
 			: "NOpenGLDrv.NOpenGLRenderDevice";
+		#endif
 		// Write the exact INI keys directly. The generic UnrealScript SET
 		// command only handles reflected class properties and silently ignored
 		// the legacy WindowedRenderDevice/RenderDevice keys.
@@ -1168,6 +1505,10 @@ UBOOL UNSDLViewport::Exec( const char* Cmd, FOutputDevice* Out )
 	}
 	else if( ParseCommand( &RenderCmd, "GetTextureFiltering" ) )
 	{
+#ifdef NSDLDRV_USE_MINIGL
+		// Query the live renderer, not the obsolete NoFiltering INI key.
+		if(RenDev && RenDev->Exec("GetTextureFiltering",Out)) return 1;
+#endif
 		char RenderClass[256] = "";
 		GetConfigString( "Engine.Engine", "GameRenderDevice",
 			RenderClass, ARRAY_COUNT(RenderClass) );
@@ -1180,7 +1521,11 @@ UBOOL UNSDLViewport::Exec( const char* Cmd, FOutputDevice* Out )
 		else
 		{
 			INT NoFiltering = 0;
+		#ifdef NSDLDRV_USE_MINIGL
+			GetConfigInt( "NMiniGLDrv.NMiniGLRenderDevice",
+		#else
 			GetConfigInt( "NOpenGLDrv.NOpenGLRenderDevice",
+		#endif
 				"NoFiltering", NoFiltering );
 			Enabled = !NoFiltering;
 		}
@@ -1190,6 +1535,10 @@ UBOOL UNSDLViewport::Exec( const char* Cmd, FOutputDevice* Out )
 	else if( ParseCommand( &RenderCmd, "SetTextureFiltering" ) )
 	{
 		const UBOOL Enabled = ParseCommand( &RenderCmd, "On" );
+#ifdef NSDLDRV_USE_MINIGL
+		// MiniGL updates cached texture filters on use; no full flush needed.
+		if(RenDev && RenDev->Exec(Enabled ? "SetTextureFiltering On" : "SetTextureFiltering Off",Out)) return 1;
+#endif
 		char RenderClass[256] = "";
 		GetConfigString( "Engine.Engine", "GameRenderDevice",
 			RenderClass, ARRAY_COUNT(RenderClass) );
@@ -1211,11 +1560,20 @@ UBOOL UNSDLViewport::Exec( const char* Cmd, FOutputDevice* Out )
 		else
 		{
 			const char* Value = Enabled ? "False" : "True";
+		#ifdef NSDLDRV_USE_MINIGL
+			SetConfigString( "NMiniGLDrv.NMiniGLRenderDevice",
+		#else
 			SetConfigString( "NOpenGLDrv.NOpenGLRenderDevice",
+		#endif
 				"NoFiltering", Value );
 			char SetCommand[128];
+		#ifdef NSDLDRV_USE_MINIGL
+			appSprintf( SetCommand,
+				"set NMiniGLDrv.NMiniGLRenderDevice NoFiltering %s", Value );
+		#else
 			appSprintf( SetCommand,
 				"set NOpenGLDrv.NOpenGLRenderDevice NoFiltering %s", Value );
+		#endif
 			GObj.Exec( SetCommand, Out );
 		}
 		if( RenDev )
@@ -1231,7 +1589,11 @@ UBOOL UNSDLViewport::Exec( const char* Cmd, FOutputDevice* Out )
 	{
 		// Toggle fullscreen.
 		if( Client->FullscreenViewport )
+		{
 			Client->EndFullscreen();
+			Client->StartupFullscreen = 0;
+			Client->SaveConfig();
+		}
 		else if( !(Actor->ShowFlags & SHOW_ChildWindow) )
 		{
 			// SDL uses the same render device in a window and fullscreen.

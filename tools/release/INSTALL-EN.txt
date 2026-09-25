@@ -1,0 +1,78 @@
+UNREAL MiniGL / AmigaOS 68k - release candidate
+
+GAME DATA: THE VERSION MATTERS
+This port is based on Unreal Engine v200. Use the original Unreal retail
+v200 data. The upstream project also lists the v205 demo as compatible;
+the demo has not been validated for this Amiga release candidate.
+Unreal Gold, Unreal Tournament and patched 224/226/227 installations are
+not validated substitutes. Do not mix System packages from different versions.
+Original game data is NOT included in this package.
+
+REQUIREMENTS
+- AmigaOS 3.x, 68060-compatible CPU with hardware/emulated FPU.
+- RTG display and a working MiniGL/PiStorm3D installation.
+- Compatible dispatch-table minigl.library in LIBS: and its backend's
+  dependencies. This GCC 6.5 build uses the MiniGL Classic v27 dispatch SDK.
+  Install the matching v27 minigl.library; the import code checks ABI 3
+  and requires the 624-byte published prefix used by UE. The two optional
+  v27 context-creation entries are not used or required by this executable.
+  Use your working PiStorm3D driver installation. No graphics drivers are
+  bundled, and this is not a standalone StormMesa build.
+- Configured AHI for audio. SDL audio/input and libmodplug are linked in.
+- Sufficient free Fast RAM for the chosen map. A minimum has not yet been
+  established for this release candidate.
+
+INSTALLATION
+1. Make a separate copy of your original v200 game installation.
+2. Keep these directories together:
+   Unreal/
+     System/   original .u packages and .int files, plus this port
+     Maps/     .unr
+     Textures/ .utx
+     Sounds/   .uax
+     Music/    .umx
+     Save/     create if missing
+     Cache/    create if missing
+3. Back up any existing Unreal-MiniGL.ini, Unreal-MiniGL executable,
+   Start-Unreal script and NMiniGLDrv.int before copying.
+4. Copy this package's System contents into the game's System directory.
+   Do NOT replace original Core.u, Engine.u, UnrealI.u or other game data.
+   No Windows DLL or EXE needs to be launched on the Amiga.
+5. Open an Amiga Shell, CD to that System directory, then run:
+     Execute Start-Unreal
+   Or run directly:
+     Stack 1048576
+     Unreal-MiniGL -INI=Unreal-MiniGL.ini
+   Start from System, not from the parent game directory.
+
+DEFAULTS AND CONTROLS
+640x480 window, bilinear filtering, lighting and audio enabled.
+Automatic timedemo is OFF: normal play has no automatic benchmark timeout.
+WASD: movement; mouse: aiming/fire; Escape: menu; Tab: console.
+F6/F7: quick save/load. F10 is an EMERGENCY EXIT: it bypasses the normal
+shutdown path and must not be used while saving. Prefer the normal Quit menu.
+Change resolution in [NSDLDrv.NSDLClient], ViewportX and ViewportY.
+Disable sound with UseSound=False in [Engine.GameEngine] if needed.
+Despite its historic name, SoundDrv.NullAudioSubsystem is the SDL/AHI
+audio implementation in this port. Do not select NOpenALDrv.
+-mglbpp=16 or -mglbpp=32 requests a color depth; the backend may choose
+another depth. No experimental rendering switches are needed to play.
+
+RELEASE BUILD
+GCC16 RC11, 68060 hard float, O3 (existing per-file exceptions retained),
+fast math, no strict aliasing, frame-pointer omission, nix20 runtime.
+No profiling, capture, allocation/array diagnostics or startup trace output.
+Renderer test/performance-probe switches are disabled in this build.
+Batching is disabled; texture hash cache and package read cache are enabled.
+Normal Unreal.log and error checks remain available for reporting failures.
+Single-player only; multiplayer and the editor are not included.
+
+BEFORE PUBLICATION
+This is a packaging/build candidate, not a hardware-certified final release.
+Test a fresh installation on PiStorm: startup, new game, audio, save/load,
+map change, filtering and normal exit. Record the working graphics driver
+version before publishing. Demo compatibility still requires testing.
+
+Unreal and its game content belong to their respective copyright owners.
+This is an unofficial port. Game data and third-party graphics drivers are
+not supplied. This document does not grant redistribution rights to them.

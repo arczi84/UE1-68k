@@ -1,0 +1,182 @@
+================================================================================
+ UNREAL 1 / AMIGA MiniGL PORT - GL CALLS USED FOR LIGHTING
+================================================================================
+ File analysed : Source/NOpenGLDrv/NOpenGLDrv.cpp
+ Backend       : MiniGL v10, classic Warp3D path (WinUAE / PiStorm 4)
+ Date          : 2026-08-21
+================================================================================
+
+
+1. SUMMARY
+--------------------------------------------------------------------------------
+
+There are NO OpenGL lighting functions in this renderer.
+
+Absent entirely:
+    glEnable( GL_LIGHTING )     glLightfv()        glLightf()
+    glMaterialfv()              glColorMaterial()  glNormal3f()
+
+This is not a defect. Unreal 1 does not use the fixed-function T&L pipeline.
+It computes lighting on the CPU (UnLight.cpp) and delivers the result to GL
+through three mechanisms only:
+
+    (a) LIGHTMAPS       - a second, multiplying pass over the base texture
+    (b) VERTEX COLOURS  - per-vertex light for meshes and tiles
+    (c) BLEND MODES     - fog, coronas, translucency
+
+Consequently every lighting problem in this port is a glBlendFunc / glTexEnv
+problem, never a "lighting" problem. MiniGL's headers expose only glShadeModel
+and glNormal3f from the whole lighting block, which is irrelevant here.
+
+
+2. Init() - INITIAL STATE
+--------------------------------------------------------------------------------
+
+  LINE   CALL
+  ----   ------------------------------------------------------------------
+  203    glShadeModel( GL_SMOOTH )
+  204    glAlphaFunc( GL_GREATER, 0.5 )
+  207    glBlendFunc( GL_ONE, GL_ZERO )
+  208    glEnable( GL_BLEND )
+  209    glTexEnvf( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE )
+
+
+3. SetBlend() - CENTRAL BLEND ROUTER
+--------------------------------------------------------------------------------
+
+Every drawing path funnels through here. This is the single most important
+function for lighting correctness.
+
+  LINE   CALL                                          APPLIES TO
+  ----   -------------------------------------------   ----------------------
+  883    glEnable( GL_BLEND )                          unconditional
+  888    glBlendFunc( GL_ONE, GL_ONE )                 PF_Translucent, CLASSIC
+  890    glBlendFunc( GL_ONE, GL_ONE_MINUS_SRC_COLOR ) PF_Translucent, PiStorm3D
+  892    glBlendFunc( GL_ONE, GL_ONE_MINUS_SRC_COLOR ) PF_Translucent, desktop
+  904    glBlendFunc( GL_DST_COLOR, GL_ZERO )          PF_Modulated,   CLASSIC
+  906    glBlendFunc( GL_DST_COLOR, GL_SRC_COLOR )     PF_Modulated,   PiStorm3D
+  908    glBlendFunc( GL_DST_COLOR, GL_SRC_COLOR )     PF_Modulated,   desktop
+  913    glBlendFunc( GL_ONE, GL_ONE_MINUS_SRC_ALPHA ) PF_Highlighted
+  917    glDisable( GL_BLEND )                         opaque
+  918    glBlendFunc( GL_ONE, GL_ZERO )                opaque
+
+NOTE - lines 888 and 904 are CLASSIC-backend detours. The classic rasterizer
+has no GL_SRC_COLOR destination factor; when asked for one it silently does
+nothing, so the affected pass becomes a no-op and the surface keeps whatever
+the pass underneath left behind.
+
+
+4. DrawComplexSurfaceSingleTex() - ACTIVE WORLD GEOMETRY PATH
+--------------------------------------------------------------------------------
+
+This is the path MiniGL actually executes (UseMultiTexture = false).
+
+  LINE   CALL                                            PASS
+  ----   ---------------------------------------------   --------------------
+  429    glColor4f( 1, 1, 1, 1 )                         base texture
+  457    glEnable( GL_BLEND )                            macro texture
+  458    glBlendFunc( GL_SRC_ALPHA,                      macro texture
+                      GL_ONE_MINUS_SRC_ALPHA )
+  460    glDepthFunc( GL_EQUAL )                         macro texture
+  490    glDepthFunc( GL_LEQUAL )                        macro texture
+  503    glEnable( GL_BLEND )                            LIGHTMAP
+  504    glBlendFunc( GL_DST_COLOR, GL_ZERO )            LIGHTMAP  <<< KEY
+  507    glDepthFunc( GL_EQUAL )                         lightmap
+  511    glColor4f( 1, 1, 1, 1 )                         lightmap
+  532    glBlendFunc( GL_DST_COLOR, GL_SRC_COLOR )       state restore
+                                                         (non-MiniGL branch)
+  535    glDepthFunc( GL_LEQUAL )                        lightmap
+  543    glDepthFunc( GL_LEQUAL )                        cleanup
+  551    glDepthFunc( GL_EQUAL )                         detail texture
+  567    glDepthFunc( GL_LEQUAL )                        detail texture
+  575    glDepthFunc( GL_EQUAL )                         fogmap
+  592    glDepthFunc( GL_LEQUAL )                        fogmap
+
+Line 504 carries essentially all static and dynamic world lighting. The
+lightmap data itself is produced by ConvertTextureMipBGRA7777(), which expands
+the engine's BGRA7777 format to 8 bits with a << 1 shift.
+
+
+5. DrawGouraudPolygon() - PER-VERTEX LIGHT (MESHES)
+--------------------------------------------------------------------------------
+
+  LINE   CALL
+  ----   ------------------------------------------------------------------
+  610    glTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE )
+  619    glColor4f( 1, 1, 1, 1 )
+  626    glColor4f( P->Light.X, P->Light.Y, P->Light.Z, 1.f )   <<< LIGHT
+  647    glColor4f( P->Fog.X, P->Fog.Y, P->Fog.Z, P->Fog.W )    <<< FOG
+
+The engine has already evaluated the lighting equation on the CPU; GL merely
+interpolates the resulting vertex colour and GL_MODULATE multiplies it into
+the texture.
+
+
+6. DrawTile() - HUD, CORONAS, SPRITES
+--------------------------------------------------------------------------------
+
+  LINE   CALL
+  ----   ------------------------------------------------------------------
+  674    glDepthFunc( GL_LEQUAL )
+  676    glDisable( GL_BLEND )
+  677    glBlendFunc( GL_ONE, GL_ZERO )
+  680    glTexEnvi( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE )
+  697    glColor4f( 1, 1, 1, 1 )
+  699    glColor4f( Light.X, Light.Y, Light.Z, 1.f )            <<< LIGHT
+
+
+7. DrawComplexSurfaceMultiTex() - DEAD CODE ON THIS BACKEND
+--------------------------------------------------------------------------------
+
+Never executed: MiniGL forces UseMultiTexture = false.
+
+  LINE       CALL                                             TARGET
+  --------   ----------------------------------------------   ---------------
+  366-371    glTexEnvi/f( GL_COMBINE, GL_COMBINE_RGB,         lightmap unit
+             GL_RGB_SCALE 2.0f, GL_COMBINE_ALPHA,
+             GL_SOURCE0_ALPHA, GL_OPERAND0_ALPHA )
+  377-382    same six calls                                    detail unit
+  388-392    same, with GL_COMBINE_RGB = GL_ADD                fogmap unit
+  395        glColor4f( 1, 1, 1, 1 )
+
+WARNING - in NOpenGLDrvPrivate.h lines 20-27 these tokens are aliased away for
+the MiniGL build:
+
+    #define GL_ADD             GL_MODULATE
+    #define GL_COMBINE         GL_MODULATE
+    #define GL_COMBINE_ALPHA   GL_TEXTURE_ENV_MODE
+    #define GL_COMBINE_RGB     GL_TEXTURE_ENV_MODE
+    #define GL_OPERAND0_ALPHA  GL_TEXTURE_ENV_MODE
+    #define GL_PREVIOUS        GL_TEXTURE_2D
+    #define GL_RGB_SCALE       GL_TEXTURE_ENV_MODE
+    #define GL_SOURCE0_ALPHA   GL_TEXTURE_ENV_MODE
+
+If this path were ever enabled on MiniGL it would not perform the intended
+multi-texture combine; it would issue a series of GL_MODULATE writes to
+GL_TEXTURE_ENV_MODE instead. Enabling UseMultiTexture would require real
+support, not just flipping the flag.
+
+
+8. MISCELLANEOUS
+--------------------------------------------------------------------------------
+
+  LINE   CALL                          CONTEXT
+  ----   ---------------------------   ----------------------------------------
+  280    glDepthFunc( GL_LEQUAL )      Lock(), per frame
+  748    glColor4fv( &ColorMod.R )     EndFlash(), damage/pickup screen flash
+
+
+9. CRITICAL POINTS
+--------------------------------------------------------------------------------
+
+  504   lightmap multiply ............ all world lighting
+  626   vertex light ................. meshes, actors, weapons
+  647   vertex fog ................... volumetric fog on meshes
+  699   tile light ................... HUD, coronas, sprites
+  883-918  SetBlend router ........... governs every pass above
+
+Anything that looks like "lighting is broken" on this backend is almost
+certainly one of these five sites, and in practice almost always a blend
+factor the classic rasterizer does not implement.
+
+================================================================================

@@ -106,6 +106,13 @@ BYTE* FMemStack::AllocateNewChunk( INT MinSize )
 	{
 		// Create new chunk.
 		INT DataSize    = Max(MinSize,DefaultChunkSize);
+#ifdef UE_ALLOC_DIAG
+		if(MinSize<0 || DataSize<0 || (DWORD)DataSize>0x7fffffffUL-256-sizeof(FTaggedMemory))
+		{
+			appAllocDiagFailure(DataSize,"MemChunk header overflow");
+			appErrorf("Invalid chunk: min=%d data=%d",MinSize,DataSize);
+		}
+#endif
 		Chunk           = (FTaggedMemory*)appMalloc( 256/*!!*/ + DataSize + sizeof(FTaggedMemory), "MemChunk" );
 		Chunk->DataSize = DataSize;
 	}

@@ -1,0 +1,51 @@
+UNREAL MiniGL / AmigaOS 68k - kandydat do wydania
+
+WYMAGANA WERSJA GRY
+Oryginalny Unreal retail v200. To port silnika v200, nie dowolnej wersji
+Unreala. Dokumentacja projektu bazowego wymienia tez demo v205, ale demo
+w tej paczce dla Amigi nie zostalo jeszcze przetestowane.
+Nie mieszaj danych v200 z Unreal Gold, UT ani patchami 224/226/227.
+Paczka NIE zawiera map, tekstur, muzyki ani oryginalnych pakietow gry.
+
+WYMAGANIA
+AmigaOS 3.x, CPU zgodne z 68060 z FPU, RTG, dzialajaca instalacja
+MiniGL/PiStorm3D z minigl.library zgodnym z SDK v27 w LIBS: oraz AHI.
+Build sprawdza ABI 3 i uzywany przez UE prefiks tablicy (624 bajty).
+Nie wymaga dwoch opcjonalnych funkcji tworzenia kontekstu dodanych w v27.
+Biblioteki graficzne nie sa dolaczone. To nie jest wersja StormMesa.
+Minimalna ilosc Fast RAM nie zostala jeszcze ustalona testami.
+
+INSTALACJA
+1. Przygotuj osobny katalog z oryginalnymi danymi Unreal v200:
+   System, Maps, Textures, Sounds, Music. Utworz tez Save i Cache.
+2. Zrob kopie istniejacych Unreal-MiniGL.ini, Unreal-MiniGL,
+   Start-Unreal i NMiniGLDrv.int, jesli juz sa w System.
+3. Skopiuj zawartosc System z tej paczki do System gry.
+   Zachowaj oryginalne .u i .int. Nie podmieniaj Core.u ani Engine.u.
+4. W Amiga Shell wejdz do katalogu System gry i wpisz:
+     Execute Start-Unreal
+   Albo:
+     Stack 1048576
+     Unreal-MiniGL -INI=Unreal-MiniGL.ini
+
+USTAWIENIA
+Domyslnie: okno 640x480, bilinear, oswietlenie i audio wlaczone.
+AutoTimedemo=False: brak automatycznego benchmarku i jego limitu czasu.
+WASD - ruch, mysz - celowanie/strzal, Escape - menu, Tab - konsola.
+F6/F7 - szybki zapis/odczyt. F10 to AWARYJNE wyjscie, z pominieciem
+zwyklego zamykania gry. Nie uzywaj podczas zapisu; normalnie wybierz Quit.
+Rozdzielczosc: ViewportX/ViewportY w [NSDLDrv.NSDLClient].
+Audio: UseSound=True/False w [Engine.GameEngine]. Nazwa
+SoundDrv.NullAudioSubsystem jest poprawna: tutaj to dzwiek SDL/AHI.
+-mglbpp=16 lub -mglbpp=32 prosi sterownik o glebie; sterownik moze
+wybrac inna. Do gry nie trzeba parametrow diagnostycznych.
+
+BUILD I STATUS
+GCC16 RC11, bez profilowania, capture i diagnostycznych logow startowych.
+Testy renderera wylaczone, batching wylaczony, cache tekstur i odczytu
+wlaczone. Zwykly Unreal.log i kontrole bledow pozostaja.
+Tylko single-player; brak multiplayera i edytora.
+To kandydat do wydania. Przed publikacja trzeba sprawdzic czysta
+instalacje na PiStorm: start, gre, audio, zapis/odczyt, zmiane mapy,
+filtrowanie i normalne wyjscie, oraz zapisac wersje dzialajacego sterownika.
+Szczegoly po angielsku: INSTALL-EN.txt.

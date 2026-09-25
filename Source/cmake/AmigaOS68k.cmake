@@ -73,7 +73,7 @@ endif()
 # /opt/amiga) this whole block is skipped, leaving that build untouched.
 set(AMIGA_CXX_STDLIB_FLAGS "")
 set(AMIGA_CXX_STDLIB_LIBS  "")
-if(NOT AMIGA_TOOLCHAIN_ROOT MATCHES "/opt/amiga$")
+if(NOT AMIGA_TOOLCHAIN_ROOT MATCHES "/opt/amiga$" AND NOT AMIGA_NATIVE_CXX_STDLIB)
   # Root of the 6.5 tree that owns the C++ headers/libs. Override with
   # -DAMIGA_CXX_STDLIB_ROOT if 6.5 lives elsewhere.
   if(NOT DEFINED AMIGA_CXX_STDLIB_ROOT)

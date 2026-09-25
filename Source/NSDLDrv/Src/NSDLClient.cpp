@@ -3,9 +3,16 @@
 
 #include "NSDLDrv.h"
 #include "UnRender.h"
+#ifdef AMIGA_USE_NATIVE_MINIGL
+#include "AmigaMiniGLWindow.h"
+#endif
 
 #ifdef PLATFORM_AMIGA
 extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+extern INT GAmigaStartupTraceFrames;
+#if defined(NSDLDRV_USE_MINIGL) && !defined(AMIGA_USE_NATIVE_MINIGL)
+extern "C" void AmigaCenterSDLWindow( void );
+#endif
 #endif
 
 IMPLEMENT_CLASS( UNSDLClient );
@@ -80,7 +87,7 @@ void UNSDLClient::Init( UEngine* InEngine )
 
 	atexit( SDL_Quit );
 
-#ifdef PLATFORM_AMIGA
+#if defined(PLATFORM_AMIGA) && !defined(AMIGA_USE_NATIVE_MINIGL)
 	// Create the selected renderer's window before loading the map. AmigaMesa
 	// needs its large contiguous context allocation while memory is still
 	// unfragmented; SoftDrv needs the same early window without SDL_OPENGL.
@@ -91,7 +98,8 @@ void UNSDLClient::Init( UEngine* InEngine )
 	GetConfigString( "Engine.Engine", "GameRenderDevice",
 		RenderClass, ARRAY_COUNT(RenderClass) );
 	appStrupr( RenderClass );
-	const UBOOL WantsOpenGL = appStrstr( RenderClass, "OPENGL" ) != NULL;
+	const UBOOL WantsOpenGL = appStrstr( RenderClass, "OPENGL" ) != NULL
+		|| appStrstr( RenderClass, "MINIGL" ) != NULL;
 	if( WantsOpenGL )
 	{
 		SDL_GL_SetAttribute( SDL_GL_RED_SIZE, 8 );
@@ -112,6 +120,12 @@ void UNSDLClient::Init( UEngine* InEngine )
 		WantsOpenGL ? "OpenGL" : "Software", EarlyX, EarlyY, (INT)StartupFullscreen );
 	SDL_Window* EarlyWindow = SDL_CreateWindow( "Unreal", SDL_WINDOWPOS_UNDEFINED,
 		SDL_WINDOWPOS_UNDEFINED, EarlyX, EarlyY, EarlyFlags );
+#ifdef NSDLDRV_USE_MINIGL
+	// SDL 1.2 hands this layer the already-visible pre-stack window. Reassert
+	// its position after the client has adopted it and updated its caption.
+	if( EarlyWindow && !StartupFullscreen )
+		AmigaCenterSDLWindow();
+#endif
 	AmigaDebugLogf( "[Amiga] Client: early window=%p error='%s'", (void*)EarlyWindow, SDL_GetError() );
 	if( !EarlyWindow )
 		appErrorf( "Could not create early Amiga window: %s", SDL_GetError() );
@@ -148,6 +162,15 @@ void UNSDLClient::Init( UEngine* InEngine )
 void UNSDLClient::Destroy()
 {
 	guard(UNSDLClient::Destroy);
+
+#ifdef AMIGA_USE_NATIVE_MINIGL
+	// GC can destroy the client before its viewports. Their renderers and
+	// native windows must be shut down while SDL's OS library bases are alive.
+	// ConditionalDestroy marks them for GC, preventing a second Destroy call;
+	// viewport destruction removes the entry from Viewports, hence reverse order.
+	for( INT i=Viewports.Num()-1; i>=0; --i )
+		Viewports(i)->ConditionalDestroy();
+#endif
 
 	if (Controller)
 	{
@@ -228,6 +251,13 @@ void UNSDLClient::Poll()
 void UNSDLClient::Tick()
 {
 	guard(UNSDLClient::Tick);
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+	{
+		debugf( NAME_Init, "FIRST: ClientTick enter viewports=%d", Viewports.Num() );
+		AmigaDebugLogf( "[Amiga] AUTO FIRST ClientTick enter viewports=%d", Viewports.Num() );
+	}
+#endif
 
 	// Process input and blit any viewports that need blitting.
 	UNSDLViewport* BestViewport = NULL;
@@ -248,15 +278,45 @@ void UNSDLClient::Tick()
 			BestViewport = Viewport;
 		}
 		// Tick input for this viewport and see if it wants to die.
+#ifdef PLATFORM_AMIGA
+		if( GAmigaStartupTraceFrames > 0 )
+		{
+			debugf( NAME_Init, "FIRST: ClientTick before input viewport=%d", i );
+			AmigaDebugLogf( "[Amiga] AUTO FIRST ClientTick before input viewport=%d", i );
+		}
+#endif
 		if( Viewport->TickInput() )
 		{
 			delete Viewport;
 			return;
 		}
+#ifdef PLATFORM_AMIGA
+		if( GAmigaStartupTraceFrames > 0 )
+		{
+			debugf( NAME_Init, "FIRST: ClientTick after input viewport=%d", i );
+			AmigaDebugLogf( "[Amiga] AUTO FIRST ClientTick after input viewport=%d", i );
+		}
+#endif
 	}
 
 	if( BestViewport )
+	{
+#ifdef PLATFORM_AMIGA
+		if( GAmigaStartupTraceFrames > 0 )
+		{
+			debugf( NAME_Init, "FIRST: ClientTick before repaint" );
+			AmigaDebugLogf( "[Amiga] AUTO FIRST ClientTick before repaint" );
+		}
+#endif
 		BestViewport->Repaint();
+	}
+#ifdef PLATFORM_AMIGA
+	if( GAmigaStartupTraceFrames > 0 )
+	{
+		debugf( NAME_Init, "FIRST: ClientTick after repaint" );
+		AmigaDebugLogf( "[Amiga] AUTO FIRST ClientTick after repaint" );
+	}
+#endif
 
 	unguard;
 }
@@ -280,6 +340,18 @@ UViewport* UNSDLClient::CurrentViewport()
 
 	if( FullscreenViewport )
 		return FullscreenViewport;
+
+#ifdef AMIGA_USE_NATIVE_MINIGL
+	if( AmigaMiniGLHasFocus() )
+	{
+		for( int i=0; i<Viewports.Num(); i++ )
+		{
+			UNSDLViewport* Viewport = (UNSDLViewport*)Viewports(i);
+			if( Viewport->GetWindow() == AmigaMiniGLGetWindow() )
+				return Viewport;
+		}
+	}
+#endif
 
 	SDL_Window *MouseWin = SDL_GetMouseFocus();
 	UNSDLViewport* TestViewport = NULL;
@@ -394,6 +466,24 @@ void UNSDLClient::EndFullscreen()
 void UNSDLClient::TryRenderDevice( UViewport* Viewport, const char* ClassName, UBOOL Fullscreen )
 {
 	guard(UNSDLClient::TryRenderDevice);
+	const char* LoadClassName = ClassName;
+#ifdef NSDLDRV_USE_MINIGL
+	// This executable contains MiniGL, not AmigaMesa. Map a hardware choice
+	// from either compatible INI onto the MiniGL class without touching SoftDrv.
+	char ConfiguredClass[256] = "";
+	if( !appStricmp(ClassName, "ini:Engine.Engine.GameRenderDevice") )
+		GetConfigString( "Engine.Engine", "GameRenderDevice",
+			ConfiguredClass, ARRAY_COUNT(ConfiguredClass) );
+	else if( !appStricmp(ClassName, "ini:Engine.Engine.WindowedRenderDevice") )
+		GetConfigString( "Engine.Engine", "WindowedRenderDevice",
+			ConfiguredClass, ARRAY_COUNT(ConfiguredClass) );
+	if( ConfiguredClass[0] )
+	{
+		appStrupr( ConfiguredClass );
+		if( appStrstr(ConfiguredClass, "OPENGL") || appStrstr(ConfiguredClass, "MINIGL") )
+			LoadClassName = "NMiniGLDrv.NMiniGLRenderDevice";
+	}
+#endif
 
 	// Recreating the renderer for a fullscreen toggle does not change the
 	// viewport. Detaching audio here stops and unregisters the current module,
@@ -409,7 +499,7 @@ void UNSDLClient::TryRenderDevice( UViewport* Viewport, const char* ClassName, U
 	}
 
 	// Find device driver.
-	UClass* RenderClass = GObj.LoadClass( URenderDevice::StaticClass, NULL, ClassName, NULL, LOAD_KeepImports, NULL );
+	UClass* RenderClass = GObj.LoadClass( URenderDevice::StaticClass, NULL, LoadClassName, NULL, LOAD_KeepImports, NULL );
 	if( RenderClass )
 	{
 		Viewport->RenDev = ConstructClassObject<URenderDevice>( RenderClass );

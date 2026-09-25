@@ -92,6 +92,8 @@ static unsigned int	dummy;
      *	froms is actually a bunch of unsigned shorts indexing tos
      */
 static int		profiling = 3;
+static int profile_started;
+static int profile_saved;
 static unsigned short	*froms;
 static struct tostruct	*tos = 0;
 static long		tolimit = 0;
@@ -124,6 +126,12 @@ void _monstartup(void)
 
     char *lowpc;
     char *highpc;
+
+    /* Both the libnix INIT list and the launcher may call us. Never replace
+     * buffers underneath an already installed interrupt sampler. */
+    if (profile_started)
+        return;
+    profile_started = 1;
 
 	/*
 	 *	round lowpc and highpc to multiples of the density we're using
@@ -198,8 +206,13 @@ void _moncleanup(void)
     int			toindex;
     struct rawarc	rawarc;
 
+    /* Autotimedemo/F10 save before graphics teardown; normal exit may follow. */
+    if (!profile_started || profile_saved)
+        return;
     moncontrol(0);
-    f = fopen( "gmon.out" , "w");
+    if (!sbuf || !froms || !tos)
+        return;
+    f = fopen( "PROGDIR:gmon.out" , "wb");
     if ( !f) {
 	perror( "mcount: gmon.out" );
 	return;
@@ -226,7 +239,13 @@ void _moncleanup(void)
 	    fwrite(&rawarc , sizeof rawarc, 1, f);
 	}
     }
-    fclose( f );
+    {
+        int failed = ferror(f);
+        if (fclose(f) != 0)
+            failed = 1;
+        if (!failed)
+            profile_saved = 1;
+    }
 }
 
 __saveallregs void mcount(void)

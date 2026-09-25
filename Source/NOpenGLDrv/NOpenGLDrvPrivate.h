@@ -2,8 +2,36 @@
 	Dependencies.
 ------------------------------------------------------------------------------------*/
 
+#ifdef NOPENGLDRV_USE_MINIGL
+// MiniGL's Amiga headers define a signed BYTE which collides with UE1's BYTE.
+// Rename only the Amiga identifier while importing the v10 dispatch API.
+#ifdef EXEC_TYPES_H
+#undef EXEC_TYPES_H
+#endif
+#define BYTE NMiniGLAmigaByte
+#include "MiniGLShared.h"
+#undef BYTE
+
+#define glActiveTexture glActiveTextureARB
+#define glMultiTexCoord2f glMultiTexCoord2fARB
+#define GL_TEXTURE0 GL_TEXTURE0_ARB
+#define GL_BGRA GL_RGBA
+#define GL_COLOR_INDEX8_EXT GL_COLOR_INDEX
+#define GL_ADD GL_MODULATE
+#define GL_COMBINE GL_MODULATE
+#define GL_COMBINE_ALPHA GL_TEXTURE_ENV_MODE
+#define GL_COMBINE_RGB GL_TEXTURE_ENV_MODE
+#define GL_OPERAND0_ALPHA GL_TEXTURE_ENV_MODE
+#define GL_PREVIOUS GL_TEXTURE_2D
+#define GL_RGB_SCALE GL_TEXTURE_ENV_MODE
+#define GL_SOURCE0_ALPHA GL_TEXTURE_ENV_MODE
+#else
 #include "glad.h"
+#endif
 #include "RenderPrivate.h"
+#ifdef UE_MINIGL_HASHCACHE
+#include "TextureBindCache.h"
+#endif
 
 /*------------------------------------------------------------------------------------
 	OpenGL rendering private definitions.
@@ -35,8 +63,13 @@ class DLL_EXPORT UNOpenGLRenderDevice : public URenderDevice
 		GLuint Id;
 		INT BaseMip;
 		INT MaxLevel;
+		GLenum AppliedMinFilter, AppliedMagFilter;
 	};
+#ifdef UE_MINIGL_HASHCACHE
+	TTextureBindCache<FCachedTexture> BindMap;
+#else
 	TMap<QWORD, FCachedTexture> BindMap;
+#endif
 	TArray<GLuint> TexAlloc;
 
 	struct FTexInfo
@@ -71,6 +104,9 @@ class DLL_EXPORT UNOpenGLRenderDevice : public URenderDevice
 		INT XB, YB;
 		INT SizeX, SizeY;
 	} CurrentSceneNode;
+#ifdef NOPENGLDRV_USE_MINIGL
+	BYTE TextureFilter; // 0=Nearest, 1=Bilinear; this port uploads level zero only.
+#endif
 
 	// Constructors.
 	UNOpenGLRenderDevice();
@@ -98,6 +134,8 @@ class DLL_EXPORT UNOpenGLRenderDevice : public URenderDevice
 
 	// UNOpenGLRenderDevice interface.
 	void SetSceneNode( FSceneNode* Frame );
+	void SetCachedTextureFilter( FCachedTexture* Bind, GLenum Min, GLenum Mag );
+	UBOOL WantsNearest( const FTextureInfo& Info, DWORD PolyFlags ) const;
 	void SetBlend( DWORD PolyFlags, UBOOL InverseOrder = false );
 	void SetTexture( INT TMU, FTextureInfo& Info, DWORD PolyFlags, FLOAT PanBias );
 	void ResetTexture( INT TMU );

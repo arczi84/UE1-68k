@@ -1,0 +1,24 @@
+Unreal MiniGL release candidate - GCC 6.5
+
+Compiler: /opt/amiga/bin/m68k-amigaos-g++
+Reported version: GCC 6.5.0b 20260819091705
+Source: same release working tree as the RC11 package, not a historic tag.
+
+Reproduce:
+  bash tools/build-minigl-gcc65-release-package.sh
+  bash tools/package-minigl-gcc65-release.sh NEW_OUTPUT_DIRECTORY
+Build parallelism: -j16, separate clean build directory.
+
+Release, effective O3, existing UnCorSc/UnProp per-file Og retained.
+-noixemul -m68060 -mhard-float -fomit-frame-pointer -ffast-math
+-fno-PIC -fno-pic -fno-strict-aliasing -g0
+UE_DISABLE_RENDER_TIMING, UE_MINIGL_HASHCACHE, UE_MINIGL_READCACHE,
+UE_MINIGL_STABLE_BASELINE, UE_RELEASE_PACKAGE.
+Linker --strip-all; no profiling or capture. Exception handling retained.
+Original object/property ABI and error checks retained.
+Missing libdebug.a supplied separately from the existing SDK archive;
+the GCC installation is not modified. CRT and C++ runtime come from GCC 6.5.
+Graphics SDK: PiStorm3D_v12 dispatch import library.
+
+Hardware startup, gameplay and performance need testing on PiStorm.
+This package does not include original game data or graphics drivers.
