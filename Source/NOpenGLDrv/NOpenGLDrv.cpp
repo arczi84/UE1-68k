@@ -414,6 +414,10 @@ UBOOL UNOpenGLRenderDevice::Init( UViewport* InViewport )
 
 	CurrentPolyFlags = PF_Occlude;
 	Viewport = InViewport;
+	// A native fullscreen switch reuses this render device, but creates a new
+	// GL context. Its viewport/projection are not the cached old context state.
+	// Invalidate even when the window size and FOV did not change.
+	SetSceneNode( NULL );
 
 #ifdef NOPENGLDRV_USE_MINIGL
 	GAmigaMiniGLTestTexture = 0;

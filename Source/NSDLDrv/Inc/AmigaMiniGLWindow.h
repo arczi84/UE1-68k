@@ -10,6 +10,8 @@ typedef union SDL_Event SDL_Event;
 int   AmigaMiniGLOpenWindow( int Width, int Height, int Fullscreen, int ColorBits );
 const char* AmigaMiniGLGetOpenError( void );
 void  AmigaMiniGLCloseWindow( void );
+void  AmigaMiniGLReleaseDisplayLock( void );
+void  AmigaMiniGLModeTrace( const char* Fmt, ... );
 void* AmigaMiniGLGetWindow( void );
 void  AmigaMiniGLSwapBuffers( void );
 void  AmigaMiniGLSetFrameLock( int Enabled );

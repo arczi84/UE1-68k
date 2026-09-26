@@ -40,3 +40,18 @@ lists demo v205, which has not been confirmed for this release here.
 Other scripts under `tools/` preserve earlier experiments; they are NOT the
 current release build entry point. Build products, backups and packages are
 intentionally excluded from Git.
+
+## PiStorm3D fullscreen fix (2026-09-25)
+
+PiStorm3D minigl.library 27.6 (V3D backend) keeps the screen bitmap locked
+between mglSwitchDisplay and the next frame's first draw in fullscreen, so
+CPU and GPU overlap. Intuition calls on the native window in that window
+(SetPointer/ClearPointer on mouse capture, SetWindowTitles) froze UE on its
+first fullscreen frame. `AmigaMiniGLWindow.c` now calls glFinish (releases
+that lock) before those calls and before closing the context.
+
+User-reported on PiStorm: fullscreen now works, 32 FPS vs 25 FPS windowed
+(same scene; windowed mode waits for every render and ClipBlits it).
+Test build: `tools/build-minigl-gcc65-v27-fslock.sh` -> `Unreal-MGL-v27-fslock`.
+The known-release script picks up the source fix on its next rebuild; the
+packaged INI still has `StartupFullscreen=False`.

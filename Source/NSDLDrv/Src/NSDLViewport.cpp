@@ -12,6 +12,10 @@ extern "C" void AmigaDebugLogf( const char* Fmt, ... );
 extern INT GAmigaStartupTraceFrames;
 extern INT GAmigaMiniGLTraceFrames;
 extern DWORD GAmigaFrameSerial;
+#ifdef AMIGA_USE_NATIVE_MINIGL
+// Log the first frames after a MiniGL mode switch (diagnoses PiStorm3D hangs).
+static INT GAmigaModeSwitchTraceFrames = 0;
+#endif
 extern "C" int AmigaRawMouseSetCapture( int Enabled );
 extern "C" int AmigaRawMouseRead( int* DX, int* DY, unsigned int* Pressed,
 	unsigned int* Released, unsigned int* Held );
@@ -742,7 +746,11 @@ void UNSDLViewport::Unlock( UBOOL Blit )
 					AmigaDebugLogf( "[Amiga] AUTO FIRST Viewport Unlock before native swap" );
 				}
 #endif
+				if( GAmigaModeSwitchTraceFrames > 0 )
+					AmigaMiniGLModeTrace( "frame: before swap (%d left)", GAmigaModeSwitchTraceFrames );
 				AmigaMiniGLSwapBuffers();
+				if( GAmigaModeSwitchTraceFrames > 0 )
+					AmigaMiniGLModeTrace( "frame: swapped (%d left)", GAmigaModeSwitchTraceFrames-- );
 #ifdef PLATFORM_AMIGA
 				if( GAmigaMiniGLTraceFrames > 0 )
 				{
@@ -878,20 +886,29 @@ void UNSDLViewport::SetClientSize( INT NewX, INT NewY, UBOOL UpdateProfile )
 }
 
 #ifdef AMIGA_USE_NATIVE_MINIGL
-void UNSDLViewport::RecreateNativeMiniGL( INT NewX, INT NewY, UBOOL Fullscreen )
+UBOOL UNSDLViewport::RecreateNativeMiniGL( INT NewX, INT NewY, UBOOL Fullscreen )
 {
 	guard(UNSDLViewport::RecreateNativeMiniGL);
 
+
 	const UBOOL HadRenderDevice = RenDev != NULL;
 	const UBOOL WasCaptured = MouseCaptured;
+	// Mode switches run between frames, while PiStorm3D fullscreen still holds
+	// the screen bitmap lock; release it before any other library call.
+	AmigaMiniGLReleaseDisplayLock();
+	AmigaMiniGLModeTrace( "switch: start %dx%d fs=%d -> %dx%d fs=%d (lock released)",
+		SizeX, SizeY, (INT)NativeMiniGLFullscreen, NewX, NewY, (INT)Fullscreen );
 	if( HadRenderDevice )
 		RenDev->Exit();
+	AmigaMiniGLModeTrace( "switch: renderer exited" );
 
 	AmigaMiniGLCloseWindow();
+	AmigaMiniGLModeTrace( "switch: old context closed" );
 	hWnd = NULL;
 	GLCtx = NULL;
 	if( !OpenNativeMiniGLWindow( NewX, NewY, Fullscreen ) )
 		appErrorf( "Could not recreate native MiniGL window/context at %dx%d", NewX, NewY );
+	AmigaMiniGLModeTrace( "switch: new context opened" );
 
 	hWnd = (SDL_Window*)AmigaMiniGLGetWindow();
 	GLCtx = (SDL_GLContext)1;
@@ -904,6 +921,9 @@ void UNSDLViewport::RecreateNativeMiniGL( INT NewX, INT NewY, UBOOL Fullscreen )
 	if( WasCaptured )
 		AmigaMiniGLSetPointerVisible( 0 );
 	UpdateWindow();
+	AmigaMiniGLModeTrace( "switch: renderer ready" );
+	GAmigaModeSwitchTraceFrames = 3;
+	return 1;
 
 	unguard;
 }
@@ -936,7 +956,8 @@ void UNSDLViewport::MakeFullscreen( INT NewX, INT NewY, UBOOL UpdateProfile )
 			SavedX = SizeX;
 			SavedY = SizeY;
 		}
-		RecreateNativeMiniGL( NewX, NewY, true );
+		if( !RecreateNativeMiniGL( NewX, NewY, true ) )
+			return;
 		Client->FullscreenViewport = this;
 		if( UpdateProfile )
 		{
