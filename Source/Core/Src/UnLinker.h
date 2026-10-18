@@ -250,6 +250,14 @@ public:
 		File = appFopen( Filename, "rb" );	
 		if( File == NULL )
 			appThrowf( LocalizeError("OpenFailed") );
+#ifdef PLATFORM_AMIGA
+		// Keep package I/O independent of the C runtime's default BUFSIZ
+		// (recent libnix uses 1 KiB instead of the previous 64 KiB).
+		INT FileBufferKiB = 64;
+		Parse( appCmdLine(), "MGLFILEBUFFER=", FileBufferKiB );
+		FileBufferKiB = Clamp( FileBufferKiB, 8, 1024 );
+		setvbuf( File, NULL, _IOFBF, FileBufferKiB*1024 );
+#endif
 		appFseek( File, 0, USEEK_END );
 		Eof = appFtell( File );
 		appFseek( File, 0, USEEK_SET );
