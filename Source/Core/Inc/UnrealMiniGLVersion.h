@@ -1,0 +1,4 @@
+#pragma once
+
+#define UNREAL_MINIGL_VERSION "1.4.1"
+#define UNREAL_MINIGL_VERSION_DATE "22.10.2026"

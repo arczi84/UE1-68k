@@ -4,7 +4,6 @@
  */
 #include <string.h>
 #include <stdio.h>
-#include <stdarg.h>
 
 #include <exec/memory.h>
 #include <exec/types.h>
@@ -28,6 +27,7 @@ extern void AmigaMiniGLBufferProbeAfter(struct Window *window);
 extern void AmigaMiniGLBufferProbeClose(void);
 extern void AmigaRawMouseShutdown(void);
 extern void AmigaEmergencyProcessExit(int result) __attribute__((noreturn));
+extern void (*GAmigaEmergencyCloseWindow)(void); /* SDLLaunch.cpp terminate handler */
 #ifdef UE_AMIGA_GPROF
 extern void _moncleanup(void);
 #endif
@@ -131,6 +131,9 @@ static SDLKey TranslateSpecialKey( UBYTE Raw )
         case 0x57: return SDLK_F8;
         case 0x58: return SDLK_F9;
         case 0x59: return SDLK_F10;
+        /* Amiga keypad parentheses: match the SDL Amiga keyboard driver. */
+        case 0x5a: return SDLK_PAGEUP;
+        case 0x5b: return SDLK_PAGEDOWN;
         case 0x5c: return SDLK_KP_DIVIDE;
         case 0x5d: return SDLK_KP_MULTIPLY;
         case 0x5e: return SDLK_KP_PLUS;
@@ -208,15 +211,20 @@ int AmigaMiniGLOpenWindow( int Width, int Height, int Fullscreen, int ColorBits 
         goto fail_intuition;
     }
     MiniGLLibraryOpen = 1;
+    GAmigaEmergencyCloseWindow = AmigaMiniGLCloseWindow;
+#ifdef UE_TIMER_DIAG
+    {
+        extern void UETimerDiagInstall(void);
+        UETimerDiagInstall();
+    }
+#endif
 
     mglChooseWindowMode( Fullscreen ? GL_FALSE : GL_TRUE );
     mglChooseNumberOfBuffers( 2 );
     mglChoosePixelDepth( ColorBits );
     mglChooseVertexBufferSize( 4096 );
-    AmigaMiniGLModeTrace( "open: before mglCreateContext %dx%d fs=%d", Width, Height, Fullscreen );
     if( !mglCreateContext( 0, 0, Width, Height ) )
     {
-        AmigaMiniGLModeTrace( "open: mglCreateContext FAILED" );
         snprintf(NativeOpenError, sizeof(NativeOpenError),
             "mglCreateContext(%dx%d, depth=%d, fullscreen=%d) failed; library=%u.%u ABI=%lu size=%lu backend=%lu",
             Width, Height, ColorBits, Fullscreen, MiniGLBase->lib_Version, MiniGLBase->lib_Revision,
@@ -229,7 +237,6 @@ int AmigaMiniGLOpenWindow( int Width, int Height, int Fullscreen, int ColorBits 
 #ifdef MGL_CAPTURE
     UETraceStart(Width, Height, Fullscreen);
 #endif
-    AmigaMiniGLModeTrace( "open: context created" );
     mglLockMode( MGL_LOCK_SMART );
 
     NativeWindow = (struct Window*)mglGetInputWindowHandle();
@@ -292,12 +299,16 @@ void AmigaMiniGLCloseWindow( void )
     }
     if( MiniGLLibraryOpen )
     {
-        AmigaMiniGLModeTrace( "close: before mglDeleteContext" );
+        /* Fullscreen: send our screen to the back before MiniGL frees its
+         * buffers. Otherwise the screen stays visible during the teardown and
+         * shows the last frame scrolled by half a buffer (seen on F10 since
+         * the SDL-free build; SDL_Quit used to bring Workbench forward first). */
+        if( NativeWindow && NativeWindow->WScreen &&
+            (NativeWindow->WScreen->Flags & SCREENTYPE) == CUSTOMSCREEN )
+            ScreenToBack( NativeWindow->WScreen );
         mglDeleteContext();
-        AmigaMiniGLModeTrace( "close: after mglDeleteContext" );
         NativeWindow = NULL;
         MiniGLClose();
-        AmigaMiniGLModeTrace( "close: library closed" );
         MiniGLLibraryOpen = 0;
     }
     if( NativeIntuitionBase )
@@ -329,36 +340,13 @@ void AmigaMiniGLEndFrame( void )
     if( FrameLockEnabled == 1 && MiniGLLibraryOpen ) mglUnlockDisplay();
 }
 
-/* PiStorm3D's fullscreen mode keeps the screen bitmap locked from one
- * mglSwitchDisplay until the next frame's first draw, and CyberGraphX forbids
- * graphics/Intuition calls on a locked bitmap: SetPointer or SetWindowTitles
- * there hangs on the first frame. glFinish releases that lock (it waits for
- * the pending render), so call it before any Intuition call on NativeWindow.
- * These calls are rare, so per-frame CPU/GPU overlap is unaffected. */
+/* Fullscreen can retain its bitmap lock after a swap. Complete rendering
+ * before Intuition touches that bitmap (pointer/title/window cleanup).
+ * This is called for window changes, not for every rendered frame. */
 static void ReleaseDisplayLock( void )
 {
     if( NativeWindow && MiniGLLibraryOpen )
         glFinish();
-}
-
-/* Mode-switch trace for PiStorm3D grey-screen hangs. Opened and closed per
- * line so the file survives the reset a hang forces; Unreal.log does not. */
-void AmigaMiniGLModeTrace( const char* Fmt, ... )
-{
-    FILE* F = fopen( "PROGDIR:modeswitch.log", "a" );
-    va_list Args;
-    if( !F )
-        return;
-    va_start( Args, Fmt );
-    vfprintf( F, Fmt, Args );
-    va_end( Args );
-    fputc( '\n', F );
-    fclose( F );
-}
-
-void AmigaMiniGLReleaseDisplayLock( void )
-{
-    ReleaseDisplayLock();
 }
 
 void AmigaMiniGLSwapBuffers( void )

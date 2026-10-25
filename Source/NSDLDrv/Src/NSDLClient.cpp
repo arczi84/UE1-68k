@@ -388,7 +388,8 @@ const TArray<SDL_Rect>& UNSDLClient::GetDisplayResolutions()
 
 	SDL_DisplayMode Mode;
 	SDL_Rect Rect = { 0, 0, 0, 0 };
-	if( SDL_GetDesktopDisplayMode( DefaultDisplay, &Mode ) == 0 )
+	// SDL 1.2 reports a 0x0 desktop mode until a video mode is set.
+	if( SDL_GetDesktopDisplayMode( DefaultDisplay, &Mode ) == 0 && Mode.w > 0 && Mode.h > 0 )
 	{
 		// we're only interested in size
 		Rect.w = Mode.w;
@@ -400,7 +401,7 @@ const TArray<SDL_Rect>& UNSDLClient::GetDisplayResolutions()
 	
 	for( INT i=0; i<NumModes; ++i )
 	{
-		if( SDL_GetDisplayMode( DefaultDisplay, i, &Mode ) == 0 )
+		if( SDL_GetDisplayMode( DefaultDisplay, i, &Mode ) == 0 && Mode.w > 0 && Mode.h > 0 )
 		{
 			// we're only interested in size
 			Rect.w = Mode.w;
@@ -408,6 +409,12 @@ const TArray<SDL_Rect>& UNSDLClient::GetDisplayResolutions()
 			DisplayResolutions.AddUniqueItem( Rect );
 		}
 	}
+
+#ifdef PLATFORM_AMIGA
+	// 16:9 mode that is light enough for 68k/MiniGL; not every RTG mode list has it.
+	SDL_Rect Wide = { 0, 0, 960, 540 };
+	DisplayResolutions.AddUniqueItem( Wide );
+#endif
 
 	appSort( &DisplayResolutions(0), DisplayResolutions.Num() );
 

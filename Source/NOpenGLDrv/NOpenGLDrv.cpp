@@ -1,3 +1,9 @@
+#ifdef NOPENGLDRV_USE_MINIGL
+#include "BrightnessCorrection.h"
+#include "UnrealMiniGLVersion.h"
+static const char GUnrealMiniGLVersion[] =
+	"$VER: Unreal-MiniGL " UNREAL_MINIGL_VERSION " (" UNREAL_MINIGL_VERSION_DATE ")";
+#endif
 #include "SDL2/SDL.h"
 #ifndef NOPENGLDRV_USE_MINIGL
 #include "glad.h"
@@ -196,6 +202,7 @@ UNOpenGLRenderDevice::UNOpenGLRenderDevice()
 	DetailTextures = true;
 	UseMultiTexture = true;
 	AutoFOV = true;
+	LastAutoFOV = 90.0f;
 	UseWindowBrightness = true;
 	CurrentBrightness = -1.f;
 	TextureUploadSemantic = 0;
@@ -231,8 +238,10 @@ UNOpenGLRenderDevice::UNOpenGLRenderDevice()
 UBOOL UNOpenGLRenderDevice::Init( UViewport* InViewport )
 {
 	guard(UNOpenGLRenderDevice::Init)
+	LastAutoFOV = 90.0f;
 
 #ifdef NOPENGLDRV_USE_MINIGL
+	debugf( NAME_Init, "%s", GUnrealMiniGLVersion + 6 );
 	GAmigaMiniGLTestMode = 0;
 	GAmigaBatch = 0;
 	GAmigaBatchStatsEnabled = Parse( appCmdLine(), "MGLBATCH=", GAmigaBatch );
@@ -249,18 +258,12 @@ UBOOL UNOpenGLRenderDevice::Init( UViewport* InViewport )
 	if(TextureFilter>1) TextureFilter=1;
 	debugf("MiniGL TextureFilter=%s (level-zero min/mag)",TextureFilter ? "Bilinear" : "Nearest");
 	GAmigaPerfMask = 0;
-#ifndef UE_RELEASE_PACKAGE
+#if !defined(UE_RELEASE_PACKAGE) || defined(UE_TIMER_DIAG)
 	Parse( appCmdLine(), "MGLPERF=", GAmigaPerfMask );
 #endif
 	GAmigaPerfMask = Clamp( GAmigaPerfMask, 0, 3 );
-#ifdef UE_MINIGL_FILTERCACHE
+	// Always cache per-texture min/mag filter state.
 	GAmigaFilterCache = 1;
-#else
-	GAmigaFilterCache = 0;
-#endif
-	Parse( appCmdLine(), "MGLFILTERCACHE=", GAmigaFilterCache );
-	if(GAmigaFilterCache<0 || GAmigaFilterCache>1)
-		appErrorf("Use -mglfiltercache=0 or -mglfiltercache=1");
 	GAmigaBlendCompat = 0;
 	Parse( appCmdLine(), "MGLBLENDCOMPAT=", GAmigaBlendCompat );
 	GAmigaBlendCompat = Clamp( GAmigaBlendCompat, 0, 3 );
@@ -414,9 +417,8 @@ UBOOL UNOpenGLRenderDevice::Init( UViewport* InViewport )
 
 	CurrentPolyFlags = PF_Occlude;
 	Viewport = InViewport;
-	// A native fullscreen switch reuses this render device, but creates a new
-	// GL context. Its viewport/projection are not the cached old context state.
-	// Invalidate even when the window size and FOV did not change.
+	// A new context has no viewport/projection, even at unchanged resolution.
+	// Force SetSceneNode to reapply both after fullscreen/window transitions.
 	SetSceneNode( NULL );
 
 #ifdef NOPENGLDRV_USE_MINIGL
@@ -521,6 +523,13 @@ void UNOpenGLRenderDevice::PostEditChange()
 void UNOpenGLRenderDevice::Flush()
 {
 	guard(UNOpenGLRenderDevice::Flush);
+#ifdef NOPENGLDRV_USE_MINIGL
+	// Brightness needs no texture deletion. Refresh existing uploads when
+	// correction is enabled, including on Classic for colour diagnostics.
+	if( CurrentBrightness >= 0.f && Viewport && Viewport->Client &&
+		CurrentBrightness != Viewport->Client->Brightness )
+		return;
+#endif
 
 	if( TexAlloc.Num() )
 	{
@@ -621,7 +630,9 @@ void UNOpenGLRenderDevice::Lock( FPlane FlashScale, FPlane FlashFog, FPlane Scre
 	if( GAmigaMiniGLTraceFrames > 0 )
 		AmigaDebugLogf( "[Amiga] AUTO MGL frame=%lu phase=after-glDepthFunc", (unsigned long)GAmigaFrameSerial );
 
+#ifndef NOPENGLDRV_USE_MINIGL
 	if( UseWindowBrightness )
+#endif
 	{
 		FLOAT TargetBrightness = CurrentBrightness;
 		if ( Viewport && Viewport->Client )
@@ -636,6 +647,7 @@ void UNOpenGLRenderDevice::Lock( FPlane FlashScale, FPlane FlashFog, FPlane Scre
 #ifndef NOPENGLDRV_USE_MINIGL
 			SDL_SetWindowBrightness( Window, Gamma );
 #else
+			BuildMiniGLLightScaleTable( BrightnessTable, CurrentBrightness );
 			(void)Gamma;
 			(void)Window;
 #endif
@@ -668,11 +680,18 @@ void UNOpenGLRenderDevice::Lock( FPlane FlashScale, FPlane FlashFog, FPlane Scre
 	else
 		ColorMod = FPlane( 0.f, 0.f, 0.f, 0.f );
 
-	if( AutoFOV && Viewport && Viewport->Actor && Viewport->Actor->DesiredFOV == 90.0f )
+	// Recompute when the FOV is the default 90 or the value set here earlier,
+	// so a resolution change (16:9 <-> 4:3) updates it; zoom FOVs are left alone.
+	if( AutoFOV && Viewport && Viewport->Actor
+	&&	( Viewport->Actor->DesiredFOV == 90.0f || Viewport->Actor->DesiredFOV == LastAutoFOV ) )
 	{
+		// Widen only for widescreen (16:9, 16:10); 4:3 and 5:4 keep the original 90.
 		const FLOAT Aspect = (FLOAT)Viewport->SizeX / (FLOAT)Viewport->SizeY;
-		const FLOAT Fov = (FLOAT)( appAtan( appTan( 90.0 * PI / 360.0 ) * ( Aspect / ( 4.0 / 3.0 ) ) ) * 360.0 ) / PI;
+		FLOAT Fov = 90.0f;
+		if( Aspect > 4.0f / 3.0f + 0.01f )
+			Fov = (FLOAT)( appAtan( appTan( 90.0 * PI / 360.0 ) * ( Aspect / ( 4.0 / 3.0 ) ) ) * 360.0 ) / PI;
 		Viewport->Actor->DesiredFOV = Fov;
+		LastAutoFOV = Fov;
 	}
 
 #ifdef PLATFORM_AMIGA
@@ -1071,7 +1090,17 @@ void UNOpenGLRenderDevice::DrawComplexSurfaceSingleTex( FSceneNode* Frame, FSurf
 		SetBlend( PF_Modulated );
 		if( Surface.PolyFlags & PF_Masked )
 			glDepthFunc( GL_EQUAL );
+#ifdef NOPENGLDRV_USE_MINIGL
+		TextureUploadSemantic = 3;
+#endif
 		SetTexture( 0, *Surface.DetailTexture, 0, 0.f );
+#ifdef NOPENGLDRV_USE_MINIGL
+		TextureUploadSemantic = 0;
+		EnableRendererBlend( PF_Modulated );
+		glBlendFunc( GL_DST_COLOR, GL_ZERO );
+		glColor4f( 1.f, 1.f, 1.f, 1.f );
+#endif
+
 
 		DrawRendererSurfacePolys( Facet.Polys, [&]( FSavedPoly* Poly, INT i )
 		{
@@ -1531,6 +1560,9 @@ void UNOpenGLRenderDevice::SetTexture( INT TMU, FTextureInfo& Info, DWORD PolyFl
 
 	// Find in cache.
 	QWORD NewCacheID = Info.CacheID;
+#ifdef NOPENGLDRV_USE_MINIGL
+	if( TextureUploadSemantic == 3 ) NewCacheID |= (1ULL << 59);
+#endif
 	if( ( PolyFlags & PF_Masked ) && Info.Palette )
 		NewCacheID |= MASKED_TEXTURE_TAG;
 	UBOOL RealtimeChanged = ( Info.TextureFlags & TF_RealtimeChanged );
@@ -1551,7 +1583,14 @@ void UNOpenGLRenderDevice::SetTexture( INT TMU, FTextureInfo& Info, DWORD PolyFl
 	if( GAmigaMiniGLTestMode == 5 && NewCacheID == Tex.CurrentCacheID )
 		RealtimeChanged = false;
 #endif
-	if( NewCacheID == Tex.CurrentCacheID && !RealtimeChanged )
+#ifdef NOPENGLDRV_USE_MINIGL
+	FCachedTexture* BrightnessBind = BindMap.Find( NewCacheID );
+	const UBOOL BrightnessChanged =
+		BrightnessBind && BrightnessBind->UploadedBrightness != (UseWindowBrightness ? CurrentBrightness : -1.f);
+#else
+	const UBOOL BrightnessChanged = false;
+#endif
+	if( NewCacheID == Tex.CurrentCacheID && !RealtimeChanged && !BrightnessChanged )
 	{
 #ifdef NOPENGLDRV_USE_MINIGL
 		// Mode 9 checks whether PiStorm3D is being overwhelmed or corrupted by
@@ -1598,7 +1637,7 @@ void UNOpenGLRenderDevice::SetTexture( INT TMU, FTextureInfo& Info, DWORD PolyFl
 	glBindTexture( GL_TEXTURE_2D, Bind->Id );
 	uunclock(BindCycles);
 
-	if( !OldBind || RealtimeChanged )
+	if( !OldBind || RealtimeChanged || BrightnessChanged )
 	{
 		// New texture or it has changed, upload it.
 		Info.TextureFlags &= ~TF_RealtimeChanged;
@@ -1616,6 +1655,9 @@ void UNOpenGLRenderDevice::SetTexture( INT TMU, FTextureInfo& Info, DWORD PolyFl
 		// Upload/reallocation may reset driver-side sampling state.
 		Bind->AppliedMinFilter = Bind->AppliedMagFilter = 0;
 		UploadTexture( Info, ( PolyFlags & PF_Masked ), !OldBind );
+#ifdef NOPENGLDRV_USE_MINIGL
+		Bind->UploadedBrightness = UseWindowBrightness ? CurrentBrightness : -1.f;
+#endif
 #ifdef NOPENGLDRV_USE_MINIGL
 		// Test whether the driver retains or asynchronously converts the shared
 		// Compose upload buffer after glTexImage2D has returned.
@@ -1934,6 +1976,14 @@ void UNOpenGLRenderDevice::UploadTexture( FTextureInfo& Info, UBOOL Masked, UBOO
 		{
 			UploadUSize = UploadVSize = 2;
 		}
+#endif
+#ifdef NOPENGLDRV_USE_MINIGL
+		if( TextureUploadSemantic == 3 )
+			ExpandMiniGLDetail( UploadBuf, UploadUSize * UploadVSize );
+		// Brightness scales only the lightmap, as SoftDrv's GMasterScale does.
+		else if( UseWindowBrightness &&
+			TextureUploadSemantic == 1 && GAmigaMiniGLTestMode != 18 )
+			ApplyMiniGLBrightness( UploadBuf, UploadUSize * UploadVSize, BrightnessTable );
 #endif
 		// Upload to GL. New storage uses TexImage; realtime/procedural updates
 		// retain the original TexSubImage path.

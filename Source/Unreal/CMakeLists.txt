@@ -9,7 +9,7 @@ endif()
 if(AMIGA)
   # Large swapped stack for UE's deep recursion (see AmigaStack.c). Kept a .c
   # file so exec/types.h doesn't collide with the engine's BYTE/WORD typedefs.
-  list(APPEND SRC_FILES "Src/AmigaStack.c" "Src/AmigaRawMouse.c")
+  list(APPEND SRC_FILES "Src/AmigaStack.c" "Src/AmigaRawMouse.c" "Src/AmigaTimerDiag.c")
   if(AMIGA_GL_BACKEND STREQUAL "MiniGL")
     list(APPEND SRC_FILES "Src/SDLAmigaNoGL.c")
   endif()
@@ -120,10 +120,15 @@ if(AMIGA)
   # [__UE_CTOR_START, __UE_CTOR_END) array that main() runs itself, since
   # libnix's crt never walks the constructor list. -T replaces the default
   # script, so amiga68k.ld is a copy of it plus the CTOR bracketing.
-  target_link_options(${PROJECT_NAME} PRIVATE
-    "-T${CMAKE_SOURCE_DIR}/cmake/amiga68k.ld")
-  set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY LINK_DEPENDS
-    "${CMAKE_SOURCE_DIR}/cmake/amiga68k.ld")
+  # clib2's startup runs the C++ constructors itself from the stock
+  # __CTOR_LIST__; the custom script breaks that (abort in EH frame setup).
+  option(UE_AMIGA_CUSTOM_LDSCRIPT "Use cmake/amiga68k.ld (off for clib2)" ON)
+  if(UE_AMIGA_CUSTOM_LDSCRIPT)
+    target_link_options(${PROJECT_NAME} PRIVATE
+      "-T${CMAKE_SOURCE_DIR}/cmake/amiga68k.ld")
+    set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY LINK_DEPENDS
+      "${CMAKE_SOURCE_DIR}/cmake/amiga68k.ld")
+  endif()
 
   if(AMIGA_GL_BACKEND STREQUAL "MiniGL")
     # SDL remains responsible for joystick/audio, but its stock archive also

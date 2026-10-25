@@ -243,7 +243,8 @@ function DrawValues(canvas Canvas, Font RegFont, int Spacing, int StartX, int St
 	{
 		SetFontBrightness( Canvas, (i == Selection - 1) );
 		Canvas.SetPos(StartX, StartY + Spacing * i);
-		Canvas.DrawText(MenuValues[i + 1], false);
+		if ( (i != 7) && (i != 10) && (i != 11) )
+			Canvas.DrawText(MenuValues[i + 1], false);
 	}
 	Canvas.DrawColor = Canvas.Default.DrawColor;
 }
@@ -346,6 +347,6 @@ defaultproperties
      HelpMessage(13)="Use the left and right arrow keys to select a Heads Up Display configuration."
      HelpMessage(14)="Adjust the amount of bobbing when moving."
 	 HelpMessage(15)="Open advanced preferences configuration menu."
-     MenuLength=15
+     MenuLength=14
      Class=Unreal.UnrealOptionsMenu
 }

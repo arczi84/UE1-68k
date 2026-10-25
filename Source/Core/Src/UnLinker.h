@@ -734,14 +734,68 @@ class ULinkerLoad : public ULinker, public FArchiveFileLoad
 					check(Import.ClassName==NAME_Package);
 					check(Import.ClassPackage==NAME_Core);
 					UPackage* TmpPkg = GObj.CreatePackage( NULL, *Import.ObjectName );
-					Import.SourceLinker = GObj.GetPackageLinker( TmpPkg, NULL, LOAD_Throw | (LoadFlags & LOAD_Propagate), NULL, NULL );
+					// Check for a missing package file up front: exceptions thrown
+					// by nested package loads are not reliably caught by this 68k
+					// toolchain's unwinder, so do not rely on the catch below.
+					{
+						UBOOL Loaded = 0;
+						for( INT k=0; k<GObj.Loaders.Num() && !Loaded; k++ )
+							Loaded = GObj.GetLoader(k)->LinkerRoot == TmpPkg;
+						char Found[256];
+#if defined(PLATFORM_AMIGA) && !defined(UE_NO_EDITOR_SKIP)
+						// The Amiga port has no UnrealEd: Editor.u (shipped on the
+						// game discs) declares native classes from Editor.dll such
+						// as Editor.TransBuffer, so loading it fails even when the
+						// file exists. Maps only reference it through stray editor
+						// textures (Dug: B_CollOn, Ruins/NaliC: Bkgnd).
+						if( !Loaded && appStricmp( *Import.ObjectName, "Editor" )==0 )
+						{
+							debugf( NAME_Warning, "Skipping editor package %s (%s), imports from it are None", *Import.ObjectName, Filename );
+							Import.SourceLinker = NULL;
+							return;
+						}
+#endif
+						if( !Loaded && !appFindPackageFile( *Import.ObjectName, NULL, Found ) )
+						{
+							debugf( NAME_Warning, "Missing import package %s (%s), imports from it are None", *Import.ObjectName, Filename );
+							Import.SourceLinker = NULL;
+							return;
+						}
+					}
+					// A missing import package (e.g. maps saved by UnrealEd that
+					// still reference Editor.B_CollOn, while this port ships no
+					// Editor.u) leaves the import unresolved instead of failing
+					// the whole map; CreateImport then yields NULL. Class imports
+					// from such a package stay fatal below.
+					try
+					{
+#if defined(PLATFORM_AMIGA) && defined(UE_AMIGA_TRACE_ALL)
+						AmigaDebugLogf( "[Amiga] VerifyImport: package %s for %s", *Import.ObjectName, Filename );
+#endif
+						Import.SourceLinker = GObj.GetPackageLinker( TmpPkg, NULL, LOAD_Throw | (LoadFlags & LOAD_Propagate), NULL, NULL );
+					}
+					catch( char* Error )
+					{
+#if defined(PLATFORM_AMIGA) && defined(UE_AMIGA_TRACE_ALL)
+						AmigaDebugLogf( "[Amiga] VerifyImport: caught '%s'", Error );
+#endif
+						debugf( NAME_Warning, "Missing import package %s (%s): %s", *Import.ObjectName, Filename, Error );
+						Import.SourceLinker = NULL;
+						return;
+					}
 				}
 				else
 				{
 					check(Import.PackageIndex<0);
 					VerifyImport( -Import.PackageIndex-1 );
 					Import.SourceLinker = ImportMap(-Import.PackageIndex-1).SourceLinker;
-					check(Import.SourceLinker);
+					if( !Import.SourceLinker && Import.ClassName!=NAME_Class )
+					{
+						debugf( NAME_Warning, "Failed import: %s %s (package missing), using None", *Import.ClassName, *Import.ObjectName );
+						return;
+					}
+					if( !Import.SourceLinker )
+						appThrowf( LocalizeError("FailedImport"), *Import.ClassName, *Import.ObjectName, Filename );
 					FObjectImport* Top;
 					for
 					(	Top = &Import

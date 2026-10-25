@@ -277,6 +277,34 @@ CORE_API void appDumpAllocs( FOutputDevice* Out )
 #endif
 	unguard;
 }
+#ifdef UE_AMIGA_SMALLALLOC
+// Size-class allocator (AmigaSmallAlloc.cpp): avoids libnix malloc's exec
+// Allocate() list walk for every small new/delete.
+extern "C" void* AmigaSmallAlloc( unsigned long Size );
+extern "C" void AmigaSmallFree( void* Ptr );
+extern "C" int AmigaSmallOwns( const void* Ptr );
+extern "C" unsigned long AmigaSmallCapacity( const void* Ptr );
+#define malloc(Size) AmigaSmallAlloc(Size)
+#define free(Ptr) AmigaSmallFree(Ptr)
+static void* AmigaSmallRealloc( void* Ptr, INT NewSize )
+{
+	if( !Ptr )
+		return AmigaSmallAlloc( NewSize );
+	if( !AmigaSmallOwns( Ptr ) )
+		return realloc( Ptr, NewSize );
+	const unsigned long Capacity = AmigaSmallCapacity( Ptr );
+	if( (unsigned long)NewSize <= Capacity )
+		return Ptr;
+	void* Result = AmigaSmallAlloc( NewSize );
+	if( Result )
+	{
+		appMemcpy( Result, Ptr, Capacity );
+		AmigaSmallFree( Ptr );
+	}
+	return Result;
+}
+#define realloc(Ptr,Size) AmigaSmallRealloc(Ptr,Size)
+#endif
 CORE_API void* appMalloc( INT Size, const char* Tag )
 {
 	guard(appMalloc);
@@ -365,6 +393,11 @@ CORE_API void* appRealloc( void* Ptr, INT NewSize, const char* Tag )
 
 	unguardf(( "%08X %i %s", (INT)Ptr, NewSize, Tag ));
 }
+#ifdef UE_AMIGA_SMALLALLOC
+#undef malloc
+#undef free
+#undef realloc
+#endif
 
 /*-----------------------------------------------------------------------------
 	Math functions.
@@ -1244,10 +1277,16 @@ const char* appStrfind( const char* str, const char* find )
 //
 // Throw a string exception with a message.
 //
+#if defined(PLATFORM_AMIGA) && defined(UE_AMIGA_TRACE_ALL)
+extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+#endif
 CORE_API void VARARGS appThrowf( const char* Fmt, ... )
 {
 	static char TempStr[4096];
 	GET_VARARGS(TempStr,Fmt);
+#if defined(PLATFORM_AMIGA) && defined(UE_AMIGA_TRACE_ALL)
+	AmigaDebugLogf( "[Amiga] appThrowf: throwing '%s'", TempStr );
+#endif
 	throw( TempStr );
 }
 

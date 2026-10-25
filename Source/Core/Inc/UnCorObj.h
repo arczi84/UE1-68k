@@ -138,7 +138,7 @@ class CORE_API USystem : public USubsystem
 	DECLARE_CLASS(USystem,USubsystem,CLASS_Config)
 
 	// Variables.
-	char Paths[96][16];
+	char Paths[16][96];		// 16 entries of 96 chars, as registered in UnPlat.cpp.
 	char SavePath[96];
 	char CachePath[96];
 	char CacheExt[32];

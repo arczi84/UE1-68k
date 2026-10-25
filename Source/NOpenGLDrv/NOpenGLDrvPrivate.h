@@ -54,6 +54,7 @@ class DLL_EXPORT UNOpenGLRenderDevice : public URenderDevice
 	UBOOL DetailTextures;
 	UBOOL UseMultiTexture;
 	UBOOL AutoFOV;
+	FLOAT LastAutoFOV;
 	UBOOL UseWindowBrightness;
 	INT SwapInterval;
 
@@ -64,6 +65,9 @@ class DLL_EXPORT UNOpenGLRenderDevice : public URenderDevice
 		INT BaseMip;
 		INT MaxLevel;
 		GLenum AppliedMinFilter, AppliedMagFilter;
+#ifdef NOPENGLDRV_USE_MINIGL
+		FLOAT UploadedBrightness;
+#endif
 	};
 #ifdef UE_MINIGL_HASHCACHE
 	TTextureBindCache<FCachedTexture> BindMap;
@@ -90,6 +94,9 @@ class DLL_EXPORT UNOpenGLRenderDevice : public URenderDevice
 
 	// Current state.
 	FLOAT CurrentBrightness;
+#ifdef NOPENGLDRV_USE_MINIGL
+	BYTE BrightnessTable[256];
+#endif
 	DWORD CurrentPolyFlags;
 	INT TextureUploadSemantic; // 0=regular, 1=lightmap, 2=fogmap
 	FLOAT RProjZ, Aspect;

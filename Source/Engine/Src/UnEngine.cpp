@@ -91,6 +91,42 @@ void UEngine::Init()
 	}
 
 	debugf( NAME_Init, "Unreal engine initialized" );
+#ifdef UE_AMIGA_TRACE_ALL
+	{ extern void AmigaEhCheck( const char* Tag ); AmigaEhCheck( "startup" ); }
+	// Diagnostic: does a C++ throw reach its catch on this build?
+	debugf( NAME_Init, "EH self-test: throwing" );
+	try
+	{
+		appThrowf( "EH self-test %i", 42 );
+	}
+	catch( char* Error )
+	{
+		debugf( NAME_Init, "EH self-test OK: caught '%s'", Error );
+	}
+#endif
+#ifdef UE_SKIN_DIAG
+	// Diagnostic only: which .int files and skin textures the registry sees.
+	for( INT p=0; p<ARRAY_COUNT(GSys->Paths); p++ )
+	{
+		if( !GSys->Paths[p] )
+			continue;
+		char Spec[256];
+		appSprintf( Spec, "%s%s", appBaseDir(), PATH(GSys->Paths[p]) );
+		char* Star = appStrstr( Spec, "*." );
+		if( !Star )
+			continue;
+		appStrcpy( Star, "*.int" );
+		TArray<FString> Ints = appFindFiles( Spec );
+		debugf( NAME_Init, "SkinDiag: path %i '%s' -> %i .int files", p, Spec, Ints.Num() );
+	}
+	{
+		TArray<FRegistryObjectInfo> Skins;
+		GObj.GetRegistryObjects( Skins, UTexture::StaticClass, NULL, 0 );
+		debugf( NAME_Init, "SkinDiag: %i texture registry objects", Skins.Num() );
+		for( INT i=0; i<Skins.Num() && i<6; i++ )
+			debugf( NAME_Init, "SkinDiag:   %s", Skins(i).Object );
+	}
+#endif
 	unguard;
 }
 

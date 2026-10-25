@@ -873,6 +873,9 @@ UBOOL appFindPackageFile( const char* In, const FGuid* Guid, char* Out )
 		return 0;
 
 	// Try file as specified.
+#ifdef UE_AMIGA_TRACE_ALL
+	AmigaDebugLogf( "[Amiga] FindPackage: '%s'", In );
+#endif
 	strcpy( Out, In );
 	if( appFSize( Out ) >= 0 )
 		return 1;
@@ -905,6 +908,9 @@ UBOOL appFindPackageFile( const char* In, const FGuid* Guid, char* Out )
 
 		// Check for file.
 		UBOOL Found = 0;
+#ifdef UE_AMIGA_TRACE_ALL
+		AmigaDebugLogf( "[Amiga] FindPackage: try '%s'", Out );
+#endif
 		Found = (appFSize(Out)>=0);
 		if( !Found && Ext )
 		{
@@ -922,6 +928,19 @@ UBOOL appFindPackageFile( const char* In, const FGuid* Guid, char* Out )
 		}
 	}
 
+#ifdef PLATFORM_AMIGA
+	// Script defaults name maps relative to the System drawer, e.g.
+	// "..\\maps\\Vortex2.unr". AmigaDOS has no ".." and the configured Paths
+	// may be volumes (UEGame:Maps/*.unr), so retry with the bare file name.
+	{
+		const char* Base = In;
+		for( const char* C = In; *C; C++ )
+			if( *C=='/' || *C=='\\' || *C==':' )
+				Base = C + 1;
+		if( Base != In && *Base )
+			return appFindPackageFile( Base, Guid, Out );
+	}
+#endif
 	// Not found.
 	return 0;
 	unguard;
@@ -1695,3 +1714,42 @@ char* appUnixPath( const char* Path )
 /*-----------------------------------------------------------------------------
 	The End.
 -----------------------------------------------------------------------------*/
+
+#ifdef UE_AMIGA_TRACE_ALL
+extern "C" void* _EH_FRAME_BEGINS__[];
+CORE_API void AmigaEhCheck( const char* Tag )
+	{
+		INT Bad = 0, Total = 0;
+		for( INT Obj = 1; _EH_FRAME_BEGINS__[Obj]; Obj++ )
+		{
+			BYTE* Start = (BYTE*)_EH_FRAME_BEGINS__[Obj];
+			BYTE* P = Start;
+			for( INT Rec = 0; Rec < 100000; Rec++ )
+			{
+				DWORD Len = *(DWORD*)P;
+				if( Len == 0 )
+					break;
+				if( Len == 0xffffffff || Len > 0x100000 )
+				{
+					debugf( NAME_Init, "EHCHECK[%s] obj %i at %08x: bad length %08x at %08x (rec %i)", Tag, Obj, (DWORD)Start, Len, (DWORD)P, Rec );
+					Bad++;
+					break;
+				}
+				DWORD Id = *(DWORD*)(P+4);
+				if( Id != 0 )
+				{
+					BYTE* Cie = (P+4) - Id;
+					Total++;
+					if( Cie < Start || Cie >= P || *(DWORD*)(Cie+4) != 0 )
+					{
+						if( Bad < 40 )
+							debugf( NAME_Init, "EHCHECK[%s] obj %i at %08x: FDE %08x -> bad CIE %08x (rec %i)", Tag, Obj, (DWORD)Start, (DWORD)P, (DWORD)Cie, Rec );
+						Bad++;
+					}
+				}
+				P += 4 + Len;
+			}
+		}
+		debugf( NAME_Init, "EHCHECK[%s] done: %i FDEs, %i bad", Tag, Total, Bad );
+	}
+#endif

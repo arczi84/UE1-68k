@@ -369,6 +369,62 @@ void UCanvas::execDrawText( FFrame& Stack, BYTE*& Result )
 	P_GET_STRING(Text);
 	P_GET_UBOOL_OPT(CR,1);
 	P_FINISH;
+#if defined(PLATFORM_AMIGA) && defined(ENGINE_USE_MINIGL)
+	// The SDL port has no Advanced Options preferences panel. Trim the
+	// legacy package's last row as well as the corrected script defaults.
+	if( Stack.Object && Stack.Object->GetClass()->GetFName() == "UnrealOptionsMenu" )
+	{
+		UIntProperty* Length = ::FindField<UIntProperty>(Stack.Object->GetClass(), "MenuLength");
+		UIntProperty* Selected = ::FindField<UIntProperty>(Stack.Object->GetClass(), "Selection");
+		if( Length && Selected )
+		{
+			INT& Count = *(INT*)((BYTE*)Stack.Object + Length->Offset);
+			INT& Row = *(INT*)((BYTE*)Stack.Object + Selected->Offset);
+			if( Count > 14 ) Count = 14;
+			if( Row > Count ) Row = Count;
+		}
+	}
+	// Legacy menu packages can draw a stale class value beside Start Game.
+	// Keep the localized label in the first column; suppress only its value.
+	if( Stack.Node && Stack.Locals && Stack.Object &&
+		Stack.Node->GetFName() == "DrawList" &&
+		Stack.Object->GetClass()->GetFName() == "UnrealMeshMenu" )
+	{
+		for( TFieldIterator<UIntProperty> It(Stack.Node); It; ++It )
+			if( It->GetFName() == "i" )
+			{
+				// Row i draws MenuList[i+1]; row 4 is MenuList[5] ("Start Game").
+				if( *(INT*)(Stack.Locals + It->Offset) == 4 )
+				{
+					UProperty* Labels = ::FindField<UProperty>(Stack.Object->GetClass(), "MenuList");
+					if( Labels && Labels->ArrayDim > 5 )
+					{
+						const char* Label = (const char*)Stack.Object->GetClass()->GetDefaultObject()
+							+ Labels->Offset + 5 * Labels->GetElementSize();
+						if( appStricmp(Text, Label) != 0 )
+							return;
+					}
+				}
+				break;
+			}
+	}
+	// Existing UnrealI.u packages draw stale values for these rows.
+	// Match the corrected DrawValues script without requiring new game assets.
+	if( Stack.Node && Stack.Locals && Stack.Object &&
+		Stack.Node->GetFName() == "DrawValues" &&
+		Stack.Object->GetClass()->GetFName() == "UnrealOptionsMenu" )
+	{
+		for( TFieldIterator<UIntProperty> It(Stack.Node); It; ++It )
+			if( It->GetFName() == "i" )
+			{
+				const INT Row = *(INT*)(Stack.Locals + It->Offset);
+				// Crosshair is drawn separately; both following rows open submenus.
+				if( Row == 7 || Row == 10 || Row == 11 )
+					return;
+				break;
+			}
+	}
+#endif
 	if( !Font )
 	{
 		Stack.ScriptWarn( 0, "DrawText: No font" );

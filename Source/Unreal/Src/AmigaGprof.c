@@ -420,10 +420,23 @@ static unsigned short *histogram_shadow;
 static unsigned short *histogram_output;
 static size_t histogram_bytes;
 
+/* Every sample outside our text is logged with its PC, so the host script can
+ * attribute it to minigl.library, the Warp3D driver, ROM or idle.  Flags: bit 0
+ * = interrupted in supervisor mode, bit 1 = ThisTask was our own task. */
+struct foreign_sample {
+  unsigned long pc;
+  unsigned short flags;
+  unsigned short pad;
+};
+#define FOREIGN_LOG_MAX 65536
+static struct foreign_sample *foreign_log;
+static volatile unsigned long foreign_log_count;
+static struct Task *sampler_task;
+
 /* Record one sample at the given interrupted program counter.  Called from
  * supervisor context, so it must not touch anything but our own buffers.
  * Not static: the assembly entry below calls it by symbol name. */
-void RecordSamplePC(unsigned long pc) {
+void RecordSamplePC(unsigned long pc, unsigned long sr) {
   if (!sampler_running || !vbdata.data)
     return;
   if (pc >= vbdata.offset) {
@@ -437,6 +450,109 @@ void RecordSamplePC(unsigned long pc) {
   /* PC outside our text segment: Kickstart, a library, or an idle loop.  These
    * are counted but not placed, so the in-text percentages stay honest. */
   ++sampler_foreign;
+  if (foreign_log && foreign_log_count < FOREIGN_LOG_MAX) {
+    struct foreign_sample *s = &foreign_log[foreign_log_count++];
+    s->pc = pc;
+    s->flags = ((sr & 0x2000) ? 1 : 0) | (SysBase->ThisTask == sampler_task ? 2 : 0);
+  }
+}
+
+/* Restart the measurement window, e.g. once the timedemo flyby begins, so that
+ * package loading does not dominate the profile.  Call counts from -pg builds
+ * are not reset; the histogram and foreign log are. */
+void AmigaGprofReset(void) {
+  if (!vbdata.data)
+    return;
+  Disable();
+  memset(vbdata.data, 0, vbdata.count * sizeof(*vbdata.data));
+  sampler_samples = 0;
+  sampler_foreign = 0;
+  foreign_log_count = 0;
+  Enable();
+}
+
+/* Approximate each loaded library's code range from its jump table targets.
+ * Internal (non-exported) functions can lie outside [min,max]; the host
+ * script assigns a PC to the nearest library below it within a slack.
+ * Runs under Forbid, so it only formats into a static buffer (no file I/O). */
+static char library_text[16384];
+static size_t library_text_len;
+static char library_vectors[8192];
+static size_t library_vectors_len;
+
+static void WriteLibraryRanges(struct List *list, const char *kind) {
+  struct Node *node;
+  for (node = list->lh_Head; node->ln_Succ; node = node->ln_Succ) {
+    struct Library *lib = (struct Library *)node;
+    unsigned long lo = 0xffffffffUL, hi = 0;
+    const unsigned short count = lib->lib_NegSize / 6;
+    unsigned short i;
+    int n;
+    for (i = 1; i <= count; ++i) {
+      const unsigned char *entry = (const unsigned char *)lib - 6 * i;
+      unsigned long target;
+      if (*(const unsigned short *)entry != 0x4ef9) /* JMP abs.l */
+        continue;
+      target = *(const unsigned long *)(entry + 2);
+      /* Fingerprints of actual loaded code anchor offline HUNK symbols.
+       * No allocation or file access while traversing the library lists. */
+      if (target && i <= 12 && node->ln_Name &&
+          (!strcmp(node->ln_Name, "minigl.library") ||
+           !strcmp(node->ln_Name, "Warp3D.library")) &&
+          library_vectors_len + 160 < sizeof(library_vectors)) {
+        unsigned int j;
+        library_vectors_len += snprintf(library_vectors + library_vectors_len,
+            sizeof(library_vectors) - library_vectors_len,
+            "%s %u %08lx ", node->ln_Name, i, target);
+        for (j = 0; j < 32; ++j)
+          library_vectors_len += snprintf(library_vectors + library_vectors_len,
+              sizeof(library_vectors) - library_vectors_len, "%02x",
+              (unsigned int)((const unsigned char *)target)[j]);
+        library_vectors[library_vectors_len++] = '\n';
+      }
+      if (target < lo) lo = target;
+      if (target > hi) hi = target;
+    }
+    if (!hi || library_text_len >= sizeof(library_text) - 1)
+      continue;
+    n = snprintf(library_text + library_text_len,
+                 sizeof(library_text) - library_text_len,
+                 "%s %08lx %08lx %08lx %u.%u %s\n", kind, (unsigned long)lib,
+                 lo, hi, lib->lib_Version, lib->lib_Revision,
+                 node->ln_Name ? node->ln_Name : "?");
+    if (n > 0)
+      library_text_len += (size_t)n;
+    if (library_text_len >= sizeof(library_text))
+      library_text_len = sizeof(library_text) - 1;
+  }
+}
+
+static void WriteForeignLog(void) {
+  FILE *out = fopen("PROGDIR:gprof-foreign.bin", "wb");
+  if (out) {
+    if (foreign_log)
+      fwrite(foreign_log, sizeof(*foreign_log), foreign_log_count, out);
+    fclose(out);
+  }
+  library_text_len = 0;
+  library_vectors_len = 0;
+  Forbid();
+  WriteLibraryRanges(&SysBase->LibList, "library");
+  WriteLibraryRanges(&SysBase->DeviceList, "device");
+  WriteLibraryRanges(&SysBase->ResourceList, "resource");
+  Permit();
+  out = fopen("PROGDIR:gprof-vectors.txt", "w");
+  if (out) {
+    fwrite(library_vectors, 1, library_vectors_len, out);
+    fclose(out);
+  }
+  out = fopen("PROGDIR:gprof-libs.txt", "w");
+  if (out) {
+    fprintf(out, "text %08lx %08lx %08lx 0.0 Unreal\n",
+            (unsigned long)&_stext, (unsigned long)&_stext, (unsigned long)&_etext);
+    fwrite(library_text, 1, library_text_len, out);
+    fclose(out);
+  }
 }
 
 /* Level 3 (VBlank) autovector handler, spliced in ahead of exec's own.
@@ -463,10 +579,13 @@ asm(
 "	.globl	_AmigaGprofLvl3Entry\n"
 "_AmigaGprofLvl3Entry:\n"
 "	movem.l	%d0-%d1/%a0-%a1,-(%sp)\n"	/* scratch regs; sp now +16 */
-"	move.l	16+2(%sp),%d0\n"		/* interrupted PC from frame */
-"	move.l	%d0,-(%sp)\n"
+"	moveq	#0,%d0\n"
+"	move.w	16(%sp),%d0\n"			/* interrupted SR from frame */
+"	move.l	%d0,-(%sp)\n"			/* arg 2; frame now at +20 */
+"	move.l	20+2(%sp),%d0\n"		/* interrupted PC from frame */
+"	move.l	%d0,-(%sp)\n"			/* arg 1 */
 "	jsr	_RecordSamplePC\n"
-"	addq.l	#4,%sp\n"
+"	addq.l	#8,%sp\n"
 "	movem.l	(%sp)+,%d0-%d1/%a0-%a1\n"
 "	move.l	_gprof_old_lvl3,-(%sp)\n"	/* chain to exec's handler */
 "	rts\n"
@@ -505,6 +624,11 @@ int profil(char *buf, size_t bufsiz,
 
       sampler_samples = 0;
       sampler_foreign = 0;
+      /* Public memory: written from the interrupt, never moved. Optional. */
+      foreign_log = (struct foreign_sample *)AllocMem(
+          FOREIGN_LOG_MAX * sizeof(*foreign_log), MEMF_PUBLIC | MEMF_CLEAR);
+      foreign_log_count = 0;
+      sampler_task = FindTask(NULL);
       /* Arm before AddIntServer: the first VBlank can fire immediately. */
       sampler_running = 1;
 
@@ -540,6 +664,11 @@ int profil(char *buf, size_t bufsiz,
     Enable();
     lvl3_vector = 0;
   }
+  WriteForeignLog();
+  if (foreign_log) {
+    FreeMem(foreign_log, FOREIGN_LOG_MAX * sizeof(*foreign_log));
+    foreign_log = 0;
+  }
   if (histogram_shadow && histogram_output && histogram_bytes)
     memcpy(histogram_output, histogram_shadow, histogram_bytes);
   if (histogram_shadow && histogram_bytes) {
@@ -557,8 +686,8 @@ int profil(char *buf, size_t bufsiz,
        * means the server never ran. */
       const unsigned long span = (unsigned long)vbdata.count * 2;
       fprintf(status,
-              "samples=%lu foreign=%lu offset=%08lx count=%lu range=%08lx..%08lx\n",
-              sampler_samples, sampler_foreign,
+              "samples=%lu foreign=%lu logged=%lu offset=%08lx count=%lu range=%08lx..%08lx\n",
+              sampler_samples, sampler_foreign, foreign_log_count,
               (unsigned long)vbdata.offset, (unsigned long)vbdata.count,
               (unsigned long)vbdata.offset,
               (unsigned long)vbdata.offset + span);

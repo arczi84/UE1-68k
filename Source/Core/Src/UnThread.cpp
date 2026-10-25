@@ -8,11 +8,24 @@
 
 #ifdef PLATFORM_WIN32
 #include <windows.h>
-#else
+#elif !defined(__CLIB2__)
 #include <pthread.h>
 #endif
 
 #include "CorePrivate.h"
+
+#ifdef __CLIB2__
+// clib2 has no pthreads (the toolchain's pthread.h is newlib/libnix only).
+// Only IpDrv and OpenAL spawn threads and neither is built for clib2, so the
+// game runs single-threaded: spawning fails, mutexes are no-op handles.
+static BYTE GDummyMutex;
+CORE_API UTHREAD appThreadSpawn( THREAD_FUNC Func, void* Arg, const char* Name, UBOOL bDetach, DWORD* OutThreadId ) { return nullptr; }
+CORE_API THREAD_RET appThreadJoin( UTHREAD Thread ) { return (THREAD_RET)nullptr; }
+CORE_API UMUTEX appMutexCreate( const char* Name ) { return (UMUTEX)&GDummyMutex; }
+CORE_API UBOOL appMutexLock( UMUTEX Mutex ) { return true; }
+CORE_API UBOOL appMutexUnlock( UMUTEX Mutex ) { return true; }
+CORE_API void appMutexFree( UMUTEX Mutex ) {}
+#else
 
 #ifdef PLATFORM_PSVITA
 #define pthread_setname_np(t, n) do { } while(0)
@@ -141,3 +154,4 @@ CORE_API void appMutexFree( UMUTEX Mutex )
 
 	unguard;
 }
+#endif // __CLIB2__

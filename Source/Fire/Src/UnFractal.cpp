@@ -4791,6 +4791,43 @@ void UIceTexture::PostLoad()
 	// Call base class.
 	UFractalTexture::PostLoad();
 
+#if defined(UE_MAPCYCLE) || defined(UE_AMIGA_TRACE_ALL)
+	{
+		UBOOL GlassOk = !GlassTexture, SourceOk = !SourceTexture;
+		for( TObjectIterator<UObject> It; It; ++It )
+		{
+			if( *It==GlassTexture )  GlassOk = 1;
+			if( *It==SourceTexture ) SourceOk = 1;
+		}
+		debugf( NAME_Log, "IceDiag %s: Glass=%08x(%s) Source=%08x(%s) flags=%08x",
+			GetFullName(), (DWORD)GlassTexture, GlassOk ? "ok" : "BAD", (DWORD)SourceTexture, SourceOk ? "ok" : "BAD", GetFlags() );
+		static UBOOL LayoutLogged = 0;
+		if( !LayoutLogged )
+		{
+			LayoutLogged = 1;
+			debugf( NAME_Log, "IceDiag layout: script PropertiesSize=%i sizeof(UIceTexture)=%i FractalTexture script=%i sizeof=%i Texture script=%i sizeof=%i",
+				GetClass()->GetPropertiesSize(), (INT)sizeof(UIceTexture),
+				UFractalTexture::StaticClass->GetPropertiesSize(), (INT)sizeof(UFractalTexture),
+				UTexture::StaticClass->GetPropertiesSize(), (INT)sizeof(UTexture) );
+			for( TFieldIterator<UProperty> It(GetClass()); It; ++It )
+				if( It->GetOwnerClass()==GetClass() )
+					debugf( NAME_Log, "IceDiag prop %s script offset=%i", It->GetName(), It->Offset );
+			debugf( NAME_Log, "IceDiag C++ offsets: Glass=%i Source=%i PanningStyle=%i Amplitude=%i MasterCount=%i VPosition=%i TickAccu=%i OldGlassTex=%i ForceRefresh=%i",
+				(INT)((BYTE*)&GlassTexture-(BYTE*)this), (INT)((BYTE*)&SourceTexture-(BYTE*)this), (INT)((BYTE*)&PanningStyle-(BYTE*)this),
+				(INT)((BYTE*)&Amplitude-(BYTE*)this), (INT)((BYTE*)&MasterCount-(BYTE*)this), (INT)((BYTE*)&VPosition-(BYTE*)this),
+				(INT)((BYTE*)&TickAccu-(BYTE*)this), (INT)((BYTE*)&OldGlassTex-(BYTE*)this), (INT)((BYTE*)&ForceRefresh-(BYTE*)this) );
+			UWaveTexture* Wave = (UWaveTexture*)0x1000;
+			UWetTexture* Wet = (UWetTexture*)0x1000;
+			debugf( NAME_Log, "IceDiag Water: script=%i sizeof=%i; Wave C++ BumpMapLight=%i; Wet C++ SourceTexture=%i",
+				UWaterTexture::StaticClass->GetPropertiesSize(), (INT)sizeof(UWaterTexture),
+				(INT)((BYTE*)&Wave->BumpMapLight-(BYTE*)Wave), (INT)((BYTE*)&Wet->SourceTexture-(BYTE*)Wet) );
+			for( TFieldIterator<UProperty> It(UWaveTexture::StaticClass); It; ++It )
+				if( It->GetOwnerClass()==UWaveTexture::StaticClass ) { debugf( NAME_Log, "IceDiag Wave first prop %s script offset=%i", It->GetName(), It->Offset ); break; }
+			for( TFieldIterator<UProperty> It(UWetTexture::StaticClass); It; ++It )
+				if( It->GetOwnerClass()==UWetTexture::StaticClass ) { debugf( NAME_Log, "IceDiag Wet first prop %s script offset=%i", It->GetName(), It->Offset ); break; }
+		}
+	}
+#endif
 	if (!SourceTexture) return;
 
 	// Validate all sizes: minima & matching requirements.

@@ -8,6 +8,11 @@
 #include <unistd.h>
 #endif
 
+#ifdef PLATFORM_AMIGA
+// GCC 16: <new> must precede UnFile.h's operator delete, or a later
+// <exception> include redeclares it with a different exception spec.
+#include <new>
+#endif
 #include "Engine.h"
 
 extern CORE_API FGlobalPlatform GTempPlatform;
@@ -18,8 +23,15 @@ extern "C" {char GCC_HIDDEN THIS_PACKAGE[64]="Launch";}
 extern "C" void AmigaDebugLogf( const char* Fmt, ... );
 #ifdef AMIGA_USE_MINIGL
 extern "C" void AmigaCenterSDLWindow( void );
+#ifdef UE_AMIGA_PROF_INI
+// Profiling build started from an icon: use a separate INI (no AutoTimedemo)
+// without touching the user's normal Unreal-MiniGL.ini.
+#define AMIGA_UNREAL_INI "PROGDIR:Unreal-MiniGL-prof.ini"
+#define AMIGA_UNREAL_INI_ARG "-INI=Unreal-MiniGL-prof.ini"
+#else
 #define AMIGA_UNREAL_INI "PROGDIR:Unreal-MiniGL.ini"
 #define AMIGA_UNREAL_INI_ARG "-INI=Unreal-MiniGL.ini"
+#endif
 #else
 #define AMIGA_UNREAL_INI "PROGDIR:Unreal.ini"
 #define AMIGA_UNREAL_INI_ARG "-INI=Unreal.ini"
@@ -384,9 +396,10 @@ static int GAmigaCtorsRun = 0; // diagnostic: how many ctors actually fired.
 // disabled for the interactive MiniGL tests.
 extern "C" void AmigaDebugLog( const char* Msg )
 {
-#ifdef UE_RELEASE_PACKAGE
+#if defined(UE_RELEASE_PACKAGE) && !defined(UE_AMIGA_TRACE_ALL)
 	(void)Msg;
 #else
+#ifndef UE_AMIGA_TRACE_ALL
 	if
 	(	!strstr(Msg,"FAIL")
 	&&	!strstr(Msg,"Error")
@@ -395,6 +408,7 @@ extern "C" void AmigaDebugLog( const char* Msg )
 	&&	!strstr(Msg,"threw")
 	&&	!strstr(Msg,"crash") )
 		return;
+#endif
 
 	// Commit every diagnostic line to persistent storage immediately. Keeping
 	// the stream open loses the directory update when PiStorm locks the whole
@@ -421,7 +435,7 @@ extern "C" void AmigaDebugLog( const char* Msg )
 #include <stdarg.h>
 extern "C" void AmigaDebugLogf( const char* Fmt, ... )
 {
-#ifdef UE_RELEASE_PACKAGE
+#if defined(UE_RELEASE_PACKAGE) && !defined(UE_AMIGA_TRACE_ALL)
 	(void)Fmt;
 #else
 	char Buf[256];
@@ -433,6 +447,7 @@ extern "C" void AmigaDebugLogf( const char* Fmt, ... )
 #endif
 }
 
+#ifndef __CLIB2__
 static void AmigaRunStaticCtors()
 {
 	// libnix's crt (-noixemul) never runs C++ global constructors, so do it
@@ -449,6 +464,39 @@ static void AmigaRunStaticCtors()
 			++GAmigaCtorsRun;
 		}
 	}
+}
+#endif
+#endif
+
+#ifdef PLATFORM_AMIGA
+#include <exception>
+extern "C" void AmigaRawMouseShutdown( void );
+extern "C" void AmigaEmergencyProcessExit( int Result ) __attribute__((noreturn));
+// Set by AmigaMiniGLWindow.c when it opens the native window. A direct call
+// would pull libNSDLDrv.a into the link twice (it is also --whole-archive).
+extern "C" { void (*GAmigaEmergencyCloseWindow)( void ) = NULL; }
+// An exception that no handler catches (for example one thrown from a
+// destructor, which C++11 makes noexcept) ends in std::terminate, whose
+// default abort() skips every cleanup. The raw mouse input handler would then
+// stay in input.device's chain and crash the whole system. Log the message,
+// release input/audio/window as F10 does, and leave through the emergency exit.
+static void AmigaTerminateHandler()
+{
+	const char* Msg = "unknown exception";
+	try { throw; }
+	catch( char* Error ) { Msg = Error; }
+	catch( const char* Error ) { Msg = Error; }
+	catch( ... ) {}
+	debugf( NAME_Critical, "Uncaught exception: %s", Msg ? Msg : "(null)" );
+	fprintf( stderr, "Unreal: uncaught exception: %s\n", Msg ? Msg : "(null)" );
+	GIsCriticalError = 1;
+	SDL_PauseAudio( 1 );
+	SDL_CloseAudio();
+	AmigaRawMouseShutdown();
+	if( GAmigaEmergencyCloseWindow )
+		GAmigaEmergencyCloseWindow();
+	SDL_Quit();
+	AmigaEmergencyProcessExit( 20 );
 }
 #endif
 
@@ -470,11 +518,16 @@ int main( int argc, const char** argv )
 	// (A full BSS wipe here is NOT safe: libnix has already initialized its own
 	// stdio/malloc state in BSS during its INIT_LIST, so zeroing everything
 	// breaks fopen/malloc. Only clear the heads we know head a list.)
+#ifndef __CLIB2__
+	// clib2's startup has already run the constructors (stock linker
+	// script), so the list heads are populated and must not be reset.
 	{ extern FPackageExport* GExportsTable; GExportsTable = NULL; }
 	FObjectManager::AmigaResetAutoRegister();
 	AmigaResetIntrinsicRegistry();
 
 	AmigaRunStaticCtors();
+#endif
+	std::set_terminate( AmigaTerminateHandler );
 	{ char b[64]; snprintf(b,sizeof(b),"[Amiga] Ran %d global constructors.",GAmigaCtorsRun); AmigaDebugLog(b); }
 #endif
 #ifdef PLATFORM_WIN32
@@ -580,7 +633,15 @@ extern "C" void EXIT_8_OpenLibs();
 #endif
 // libnix's low-level process exit.  Unlike exit(), this does not walk the
 // stock C++ destructor list, which our custom constructor layout replaces.
+#ifdef __CLIB2__
+// clib2: _exit() likewise skips atexit/destructor processing.
+extern "C" void AmigaLowLevelExit( int Result ) __asm__("__exit");
+#elif !defined(__libnix__)
+// newlib: the libnix-style crt0 exit, same semantics as libnix's.
+extern "C" void AmigaLowLevelExit( int Result ) __asm__("___exit");
+#else
 extern "C" void AmigaLowLevelExit( int Result ) __asm__("____exit");
+#endif
 #ifndef AMIGA_USE_MINIGL
 extern "C" void* glBase;
 #endif

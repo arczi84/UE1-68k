@@ -53,7 +53,7 @@ class NSDLDRV_API UNSDLViewport : public UViewport
 	void EndFullscreen();
 	UBOOL TickInput(); // returns true if the viewport has requested death
 #ifdef AMIGA_USE_NATIVE_MINIGL
-	UBOOL RecreateNativeMiniGL( INT NewX, INT NewY, UBOOL Fullscreen );
+	void RecreateNativeMiniGL( INT NewX, INT NewY, UBOOL Fullscreen );
 #endif
 
 private:

@@ -253,6 +253,17 @@ typedef int SDL_Scancode;
 #define SDL_SCANCODE_LEFTBRACKET  SDLK_LEFTBRACKET
 #define SDL_SCANCODE_RIGHTBRACKET SDLK_RIGHTBRACKET
 #define SDL_SCANCODE_KP_PERIOD    SDLK_KP_PERIOD
+#define SDL_SCANCODE_KP_ENTER     SDLK_KP_ENTER
+#define SDL_SCANCODE_KP_PLUS      SDLK_KP_PLUS
+#define SDL_SCANCODE_KP_MINUS     SDLK_KP_MINUS
+#define SDL_SCANCODE_KP_MULTIPLY  SDLK_KP_MULTIPLY
+#define SDL_SCANCODE_KP_DIVIDE    SDLK_KP_DIVIDE
+#define SDL_SCANCODE_KP_EQUALS    SDLK_KP_EQUALS
+#define SDL_SCANCODE_MINUS        SDLK_MINUS
+#define SDL_SCANCODE_APOSTROPHE   SDLK_QUOTE
+#define SDL_SCANCODE_PAUSE        SDLK_PAUSE
+#define SDL_SCANCODE_NUMLOCKCLEAR SDLK_NUMLOCK
+#define SDL_SCANCODE_SCROLLLOCK   SDLK_SCROLLOCK
 
 // Number rows and function keys. SDL 1.2 keysyms are contiguous across these
 // ranges, matching how NSDLDrv fills KeyMap with INIT_KEY_RANGE.
@@ -264,11 +275,10 @@ typedef int SDL_Scancode;
 #define SDL_SCANCODE_KP_9         SDLK_KP9
 #define SDL_SCANCODE_F1           SDLK_F1
 #define SDL_SCANCODE_F12          SDLK_F12
-// SDL 1.2 only defines up to F15, and Amiga keyboards have no F13+. Map the
-// F13..F24 range to the unused keysyms just past F15 so KeyMap stays in
-// bounds (KeyMap is sized SDLK_LAST); these entries are simply never hit.
-#define SDL_SCANCODE_F13          (SDLK_F15+1)
-#define SDL_SCANCODE_F24          (SDLK_F15+12)
+// SDL 1.2 only has F1..F15. Never invent a range beyond F15: those
+// keysyms belong to NumLock, CapsLock, Shift, Ctrl and Alt.
+#define SDL_SCANCODE_F13          SDLK_F13
+#define SDL_SCANCODE_F15          SDLK_F15
 
 /*-----------------------------------------------------------------------------
 	Renderer / Texture (SDL2 software-blit path). This is what SoftDrv uses to

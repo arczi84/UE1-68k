@@ -1194,6 +1194,9 @@ void FObjectManager::Init()
 	AddToRoot( new UTextBufferFactory );
 
 	debugf( NAME_Init, "Object subsystem initialized" );
+#if defined(UE_MAPCYCLE) || defined(UE_AMIGA_TRACE_ALL)
+	{ extern CORE_API void AmigaLayoutRecord(); AmigaLayoutRecord(); }
+#endif
 	unguard;
 }
 
@@ -1669,7 +1672,17 @@ ULinkerLoad* FObjectManager::GetPackageLinker
 		{
 			// Verify that file exists.
 			if( !appFindPackageFile( InFilename, CompatibleGuid, NewFilename ) )
+			{
+#if defined(PLATFORM_AMIGA) && defined(UE_AMIGA_TRACE_ALL)
+				AmigaDebugLogf( "[Amiga] GetPackageLinker: not found, throwing for '%s'", InFilename );
+				{ extern void AmigaEhCheck( const char* Tag ); AmigaEhCheck( "before-throw" ); }
+				const char* Fmt = LocalizeError("FileNotFound");
+				AmigaDebugLogf( "[Amiga] GetPackageLinker: LocalizeError -> '%s'", Fmt ? Fmt : "(null)" );
+				appThrowf( Fmt, InFilename );
+#else
 				appThrowf( LocalizeError("FileNotFound"), InFilename );
+#endif
+			}
 
 			// Resolve package name from filename.
 			char Tmp[256], *T=Tmp;
@@ -1731,6 +1744,9 @@ ULinkerLoad* FObjectManager::GetPackageLinker
 	}
 	catch( char* Error )
 	{
+#if defined(PLATFORM_AMIGA) && defined(UE_AMIGA_TRACE_ALL)
+		AmigaDebugLogf( "[Amiga] GetPackageLinker: caught '%s'", Error );
+#endif
 		SafeLoadError( LoadFlags, Error, LocalizeError("FailedLoad"), InFilename ? InFilename : InParent ? InParent->GetName() : "NULL", Error );
 	}
 
@@ -3025,7 +3041,10 @@ void CacheDrivers( UBOOL ForceRefresh )
 					TArray<FString> Files = appFindFiles( Filename );
 					for( INT j=0; j<Files.Num(); j++ )
 					{
-						appSprintf( Tmp, "%s%s", appBaseDir(), *Files(j) );
+						// Tmp already points after the directory prefix in Filename.
+						// Adding appBaseDir() again produces an invalid path (e.g.
+						// PROGDIR:../System/PROGDIR:male2skins.int on Amiga).
+						appStrcpy( Tmp, *Files(j) );
 						if( GetConfigSection( "Public", Buffer, ARRAY_COUNT(Buffer), Tmp ) )
 						{
 							char* Next;
@@ -3591,3 +3610,49 @@ IMPLEMENT_CLASS(ULanguage);
 /*-----------------------------------------------------------------------------
 	The End.
 -----------------------------------------------------------------------------*/
+
+#if defined(UE_MAPCYCLE) || defined(UE_AMIGA_TRACE_ALL)
+// Test builds: native classes register with PropertiesSize = sizeof(C++ class);
+// loading the script replaces it with the script's size. Record the C++ sizes
+// at startup and report every class whose script size differs later on
+// (m68k aligns ints/pointers to 2 bytes and reuses base-class tail padding).
+static UClass* GLayoutClass[1024];
+static INT GLayoutSize[1024];
+static INT GLayoutCount = 0;
+static UBOOL GLayoutReported[1024];
+CORE_API void AmigaLayoutRecord()
+{
+	for( TObjectIterator<UClass> It; It && GLayoutCount<1024; ++It )
+	{
+		GLayoutClass[GLayoutCount] = *It;
+		GLayoutSize[GLayoutCount] = It->GetPropertiesSize();
+		GLayoutReported[GLayoutCount] = 0;
+		GLayoutCount++;
+	}
+	debugf( NAME_Init, "LayoutCheck: recorded %i native classes", GLayoutCount );
+}
+CORE_API void AmigaLayoutCheck( const char* Tag )
+{
+	INT Checked = 0, Bad = 0;
+	for( INT i=0; i<GLayoutCount; i++ )
+	{
+		UClass* C = GLayoutClass[i];
+		if( !C->GetLinker() && C->GetPropertiesSize()==GLayoutSize[i] )
+			continue;
+		Checked++;
+		if( C->GetPropertiesSize() != GLayoutSize[i] )
+		{
+			Bad++;
+			if( !GLayoutReported[i] )
+			{
+				GLayoutReported[i] = 1;
+				debugf( NAME_Log, "LayoutCheck[%s]: %s script size %i, C++ sizeof %i", Tag, C->GetPathName(), C->GetPropertiesSize(), GLayoutSize[i] );
+				for( TFieldIterator<UProperty> It(C); It; ++It )
+					if( It->GetOwnerClass()==C )
+						debugf( NAME_Log, "LayoutCheck[%s]:   %s.%s script offset=%i size=%i", Tag, C->GetName(), It->GetName(), It->Offset, It->GetSize() );
+			}
+		}
+	}
+	debugf( NAME_Log, "LayoutCheck[%s]: %i classes from script checked, %i size mismatches", Tag, Checked, Bad );
+}
+#endif

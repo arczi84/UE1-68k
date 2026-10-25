@@ -135,7 +135,13 @@ static int                  (*s_entry_fn)( int, const char** );
 struct amigamesa_context;
 extern void AmigaDebugLogf( const char* fmt, ... );
 extern void AmigaRawMouseShutdown( void );
+#ifdef __CLIB2__
+extern void AmigaLowLevelExit( int result ) __asm__("__exit") __attribute__((noreturn));
+#elif !defined(__libnix__) /* newlib: its libnix-style crt0 exit */
+extern void AmigaLowLevelExit( int result ) __asm__("___exit") __attribute__((noreturn));
+#else
 extern void AmigaLowLevelExit( int result ) __asm__("____exit") __attribute__((noreturn));
+#endif
 #ifndef AMIGA_USE_MINIGL
 extern void EXIT_8_OpenLibs( void );
 extern int GAmigaUseOpenGL;

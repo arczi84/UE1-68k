@@ -10,8 +10,13 @@
 #include "UnRender.h"
 #include "UnNet.h"
 
+#ifdef UE_TIMER_DIAG
+extern "C" void UETimerDiagReset(void);
+extern "C" void UETimerDiagReport(FILE* F, unsigned long Frames);
+#endif
 #ifdef UE_AMIGA_GPROF
 extern "C" void _moncleanup(void);
+extern "C" void AmigaGprofReset(void);
 #endif
 
 #ifdef PLATFORM_AMIGA
@@ -583,9 +588,18 @@ ULevel* UGameEngine::LoadMap( const FURL& URL, UPendingLevel* Pending, char* Err
 	if( Client && Client->Viewports.Num() && GLevel )
 	{
 		GLevel->GetLevelInfo()->LevelAction = LEVACT_Loading;
+#ifdef PLATFORM_AMIGA
+		AmigaDebugLogf( "[Amiga] LoadMap: PaintProgress..." );
+#endif
 		PaintProgress();
+#ifdef PLATFORM_AMIGA
+		AmigaDebugLogf( "[Amiga] LoadMap: PaintProgress done, Audio->SetViewport..." );
+#endif
 		if( Audio )
 			Audio->SetViewport( Client->Viewports(0) );
+#ifdef PLATFORM_AMIGA
+		AmigaDebugLogf( "[Amiga] LoadMap: SetViewport done" );
+#endif
 		GLevel->GetLevelInfo()->LevelAction = LEVACT_None;
 	}
 	unguard;
@@ -1018,6 +1032,34 @@ ULevel* UGameEngine::LoadMap( const FURL& URL, UPendingLevel* Pending, char* Err
 	unguard;
 
 	// Successfully started local level.
+#if defined(UE_MAPCYCLE) || defined(UE_AMIGA_TRACE_ALL)
+	{
+		extern CORE_API void AmigaLayoutCheck( const char* Tag );
+		AmigaLayoutCheck( *URL.Map );
+		static UBOOL StructsLogged = 0;
+		if( !StructsLogged )
+		{
+			StructsLogged = 1;
+			for( TObjectIterator<UStruct> It; It; ++It )
+				if( !It->IsA(UClass::StaticClass) && !It->IsA(UState::StaticClass) && !It->IsA(UFunction::StaticClass) )
+					debugf( NAME_Log, "LayoutCheck struct %s script size %i", It->GetPathName(), It->GetPropertiesSize() );
+			debugf( NAME_Log, "LayoutCheck C++ sizeof: FVector=%i FPlane=%i FRotator=%i FScale=%i FColor=%i FCoords=%i FBox=%i FGuid=%i FPointRegion=%i FModelCoords=%i",
+				(INT)sizeof(FVector), (INT)sizeof(FPlane), (INT)sizeof(FRotator), (INT)sizeof(FScale), (INT)sizeof(FColor),
+				(INT)sizeof(FCoords), (INT)sizeof(FBox), (INT)sizeof(FGuid), (INT)sizeof(FPointRegion), (INT)sizeof(FModelCoords) );
+			ABrush* B = (ABrush*)0x1000;
+			for( TFieldIterator<UProperty> It(ABrush::StaticClass); It; ++It )
+				if( It->GetOwnerClass()==ABrush::StaticClass )
+					debugf( NAME_Log, "LayoutCheck Brush.%s script offset=%i", It->GetName(), It->Offset );
+			debugf( NAME_Log, "LayoutCheck C++ ABrush: CsgOper=%i MainScale=%i PostScale=%i TempScale=%i BrushColor=%i PolyFlags=%i",
+				(INT)((BYTE*)&B->CsgOper-(BYTE*)B), (INT)((BYTE*)&B->MainScale-(BYTE*)B), (INT)((BYTE*)&B->PostScale-(BYTE*)B),
+				(INT)((BYTE*)&B->TempScale-(BYTE*)B), (INT)((BYTE*)&B->BrushColor-(BYTE*)B), (INT)((BYTE*)&B->PolyFlags-(BYTE*)B) );
+		}
+		UPlayer* P = (UPlayer*)0x1000;
+		debugf( NAME_Log, "LayoutCheck C++: sizeof(UObject)=%i UPlayer: FOutputDevice base=%i Actor=%i Console=%i TravelItems=%i",
+			(INT)sizeof(UObject), (INT)((BYTE*)(FOutputDevice*)P-(BYTE*)P), (INT)((BYTE*)&P->Actor-(BYTE*)P),
+			(INT)((BYTE*)&P->Console-(BYTE*)P), (INT)((BYTE*)&P->TravelItems-(BYTE*)P) );
+	}
+#endif
 #ifdef PLATFORM_AMIGA
 	AmigaDebugLogf( "[Amiga] LoadMap: SUCCESS, returning GLevel=%p", (void*)GLevel );
 #endif
@@ -1248,6 +1290,84 @@ void UGameEngine::Tick( FLOAT DeltaSeconds )
 		AmigaDebugLogf( "[Amiga] AUTO FIRST EngineTick enter" );
 	}
 #endif
+#ifdef UE_MAPCYCLE
+	// Test build: -MAPCYCLE=MapA+MapB+... travels to each map in turn like a
+	// level-exit teleporter (relative, with items), ~1200 ticks after the
+	// previous level came up, so a whole campaign can be checked unattended.
+	{
+		static char CycleList[2048] = "";
+		static INT CycleState = 0;		// 0 = not parsed, -1 = off/done, 1 = active
+		static char* CycleNext = NULL;
+		static ULevel* CycleLevel = NULL;
+		static INT CycleTicks = 0;
+		if( CycleState == 0 )
+		{
+			CycleState = Parse( appCmdLine(), "MAPCYCLE=", CycleList, ARRAY_COUNT(CycleList) ) && CycleList[0] ? 1 : -1;
+			CycleNext = CycleList;
+		}
+		if( CycleState == 1 )
+		{
+			if( GLevel != CycleLevel )
+			{
+				CycleLevel = GLevel;
+				CycleTicks = 0;
+			}
+			if( ++CycleTicks == 1200 )
+			{
+				if( !*CycleNext )
+				{
+					debugf( NAME_Log, "MapCycle: done" );
+					CycleState = -1;
+				}
+				else
+				{
+					char Map[64];
+					INT n = 0;
+					while( *CycleNext && *CycleNext != '+' && n < 63 )
+						Map[n++] = *CycleNext++;
+					Map[n] = 0;
+					if( *CycleNext == '+' )
+						CycleNext++;
+					debugf( NAME_Log, "MapCycle: travel to %s", Map );
+					if( Client && Client->Viewports.Num() )
+						SetClientTravel( Client->Viewports(0), Map, 1, 1, TRAVEL_Relative );
+				}
+			}
+		}
+	}
+#endif
+#ifdef UE_AMIGA_TRACE_ALL
+	// Diagnostic: -AUTOTRAVEL=<url> opens that URL ~15 s into the intro, the
+	// same absolute travel as the Player menu's Start Game, without keyboard.
+	{
+		static INT AutoTravelTicks = 0;
+		static char AutoTravelUrl[256] = "";
+		if( AutoTravelTicks == 0 && !Parse( appCmdLine(), "AUTOTRAVEL=", AutoTravelUrl, ARRAY_COUNT(AutoTravelUrl) ) )
+			AutoTravelTicks = -1;
+		if( AutoTravelTicks >= 0 && AutoTravelUrl[0] && ++AutoTravelTicks == 1500 )
+		{
+			char Cmd[300];
+			appSprintf( Cmd, "OPEN %s", AutoTravelUrl );
+			debugf( NAME_Log, "AutoTravel: %s", Cmd );
+			if( Client && Client->Viewports.Num() )
+				Client->Viewports(0)->Exec( Cmd );
+			AutoTravelTicks = -1;
+		}
+		// -AUTOTRAVEL2=<url>: ~1500 ticks later, travel like a level-exit
+		// teleporter (GameInfo.SendPlayer: TRAVEL_Relative with items).
+		static INT AutoTravel2Ticks = 0;
+		static char AutoTravel2Url[256] = "";
+		if( AutoTravel2Ticks == 0 && !Parse( appCmdLine(), "AUTOTRAVEL2=", AutoTravel2Url, ARRAY_COUNT(AutoTravel2Url) ) )
+			AutoTravel2Ticks = -1;
+		if( AutoTravel2Ticks >= 0 && AutoTravel2Url[0] && ++AutoTravel2Ticks == 3000 )
+		{
+			debugf( NAME_Log, "AutoTravel2: %s (relative, items)", AutoTravel2Url );
+			if( Client && Client->Viewports.Num() )
+				SetClientTravel( Client->Viewports(0), AutoTravel2Url, 1, 1, TRAVEL_Relative );
+			AutoTravel2Ticks = -1;
+		}
+	}
+#endif
 	INT LocalTickCycles=0;
 	uclock(LocalTickCycles);
 #ifdef PLATFORM_AMIGA
@@ -1293,6 +1413,13 @@ void UGameEngine::Tick( FLOAT DeltaSeconds )
 			// load time, not rendering.
 			AutoTimedemoWallStart = WallNow;
 			AutoTimedemoWallLast  = WallNow;
+#ifdef UE_TIMER_DIAG
+			UETimerDiagReset();
+#endif
+#ifdef UE_AMIGA_GPROF
+			// Profile only the flyby, not startup and package loading.
+			AmigaGprofReset();
+#endif
 		}
 		else
 		{
@@ -1351,6 +1478,9 @@ void UGameEngine::Tick( FLOAT DeltaSeconds )
 					(FLOAT)WallFps, AutoTimedemoWallFrames, (FLOAT)WallSecs );
 				fprintf( F, "Worst frame: %.0f ms (%.2f FPS)\n",
 					(FLOAT)(AutoTimedemoWorstFrame*1000.0), (FLOAT)WorstFps );
+#ifdef UE_TIMER_DIAG
+				UETimerDiagReport( F, (unsigned long)AutoTimedemoWallFrames );
+#endif
 				fclose( F );
 			}
 			else

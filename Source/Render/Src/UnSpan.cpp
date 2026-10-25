@@ -5,6 +5,11 @@
 
 #include "RenderPrivate.h"
 
+#ifdef PLATFORM_AMIGA
+static INT GAmigaSpanFast = -1;
+static INT GAmigaSpanPool = 0;
+#endif
+
 #define UPDATE_PREVLINK(START,END)\
 {\
 	TopSpan         = New<FSpan>(*Mem,1,4);\
@@ -22,6 +27,16 @@
     NewSpan->Start  = START;\
     NewSpan->End    = END;\
     PrevLink        = &(NewSpan->Next);\
+    ValidLines++;\
+};
+
+#define UPDATE_RASTER_PREVLINK(START,END)\
+{\
+    NewSpan = AllocOutputSpan();\
+    *PrevLink = NewSpan;\
+    NewSpan->Start = START;\
+    NewSpan->End = END;\
+    PrevLink = &NewSpan->Next;\
     ValidLines++;\
 };
 
@@ -197,7 +212,38 @@ INT FSpanBuffer::CopyFromRasterUpdate( FSpanBuffer& Screen, INT RasterStartY, IN
 {
     guard(FSpanBuffer::CopyFromRasterUpdate);
 
+#ifdef PLATFORM_AMIGA
+    if( GAmigaSpanFast < 0 )
+    {
+        // Experiments are opt-in: no repeatable speedup established yet.
+        GAmigaSpanFast = 0;
+        Parse(appCmdLine(), "SPANFAST=", GAmigaSpanFast);
+        Parse(appCmdLine(), "SPANPOOL=", GAmigaSpanPool);
+        GAmigaSpanFast = GAmigaSpanFast ? 1 : 0;
+        debugf("Span single-interval fast path=%i",GAmigaSpanFast);
+        debugf("Span output pool=%i",GAmigaSpanPool);
+    }
+#endif
+
     FRasterSpan *Line;
+    FSpan* OutputPoolNext = NULL;
+    INT OutputPoolLeft = 0;
+    const auto AllocOutputSpan = [&]() -> FSpan*
+    {
+#ifdef PLATFORM_AMIGA
+        if( GAmigaSpanPool )
+        {
+            if( !OutputPoolLeft )
+            {
+                OutputPoolNext = New<FSpan>(*Mem,16,4);
+                OutputPoolLeft = 16;
+            }
+            OutputPoolLeft--;
+            return OutputPoolNext++;
+        }
+#endif
+        return New<FSpan>(*Mem,1,4);
+    };
     FSpan       **ScreenIndex,*NewScreenSpan,*NewSpan,*ScreenSpan,**PrevScreenLink;
     FSpan       **TempIndex,**PrevLink;
 	int			i,OurStart,OurEnd,Accept=0;
@@ -238,6 +284,41 @@ INT FSpanBuffer::CopyFromRasterUpdate( FSpanBuffer& Screen, INT RasterStartY, IN
 			goto NextLine;
 
         // Skip past all spans that occur before the raster.
+#ifdef PLATFORM_AMIGA
+        if( GAmigaSpanFast && !ScreenSpan->Next )
+        {
+            const INT Left = Max(ScreenSpan->Start, Line->X[0]);
+            const INT Right = Min(ScreenSpan->End, Line->X[1]);
+            if( Left >= Right )
+                goto NextLine;
+            Accept = 1;
+            UPDATE_RASTER_PREVLINK(Left,Right);
+            if( Left == ScreenSpan->Start )
+            {
+                if( Right == ScreenSpan->End )
+                {
+                    *PrevScreenLink = NULL;
+                    Screen.ValidLines--;
+                }
+                else
+                    ScreenSpan->Start = Right;
+            }
+            else
+            {
+                if( Right < ScreenSpan->End )
+                {
+                    NewScreenSpan = New<FSpan>(*Screen.Mem,1,4);
+                    NewScreenSpan->Start = Right;
+                    NewScreenSpan->End = ScreenSpan->End;
+                    NewScreenSpan->Next = NULL;
+                    ScreenSpan->Next = NewScreenSpan;
+                    Screen.ValidLines++;
+                }
+                ScreenSpan->End = Left;
+            }
+            goto NextLine;
+        }
+#endif
         while( ScreenSpan->End <= Line->X[0] )
         {
             PrevScreenLink  = &(ScreenSpan->Next);
@@ -253,7 +334,7 @@ INT FSpanBuffer::CopyFromRasterUpdate( FSpanBuffer& Screen, INT RasterStartY, IN
         {
             // Add partial chunk to span buffer.
             Accept = 1;
-            UPDATE_PREVLINK_ALLOC(Line->X[0],Min(Line->X[1], ScreenSpan->End));
+            UPDATE_RASTER_PREVLINK(Line->X[0],Min(Line->X[1], ScreenSpan->End));
 
             // See if span entirely encloses raster; if so, break span
             // up into two pieces and we're done.
@@ -292,7 +373,7 @@ INT FSpanBuffer::CopyFromRasterUpdate( FSpanBuffer& Screen, INT RasterStartY, IN
         {
             // Add entire chunk to temporary span buffer.
             Accept = 1;
-            UPDATE_PREVLINK_ALLOC(ScreenSpan->Start,ScreenSpan->End);
+            UPDATE_RASTER_PREVLINK(ScreenSpan->Start,ScreenSpan->End);
 
             // Delete this span from the span buffer.
             *PrevScreenLink = ScreenSpan->Next;
@@ -310,7 +391,7 @@ INT FSpanBuffer::CopyFromRasterUpdate( FSpanBuffer& Screen, INT RasterStartY, IN
         {
             // Add chunk from Span->Start to Line->End.X to temp span buffer.
             Accept = 1;
-            UPDATE_PREVLINK_ALLOC(ScreenSpan->Start,Line->X[1]);
+            UPDATE_RASTER_PREVLINK(ScreenSpan->Start,Line->X[1]);
 
             // Shorten this span line by removing the raster.
             ScreenSpan->Start = Line->X[1];

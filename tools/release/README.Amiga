@@ -1,0 +1,163 @@
+Short:        Unreal MiniGL for AmigaOS 68k
+Author:       Amiga 68k / MiniGL port by arczi84; based on UE1 ports by Northfear, BSzili and BeWorld
+Type:         Games/Shoot3D
+Version:      1.4.1
+Requires:     AmigaOS 3.x, 68060-compatible CPU with FPU, RTG, MiniGL/PiStorm3D, AHI
+Architecture: m68k-amigaos
+
+Unreal MiniGL is an AmigaOS 68k port of Unreal Engine 1.
+This package uses game data from the Unreal S3 OEM v219 release.
+The engine is based on the v200 source with Amiga and MiniGL modifications;
+v219 refers to the game data, not a replacement v219 engine source tree.
+
+The inspected S3 OEM v219 disc contains Core.u, Engine.u, Fire.u and
+UnrealI.u matching the original retail v200 reference byte-for-byte.
+The port's modified packages and configuration are applied over the data.
+Unreal Gold, Unreal Tournament and patched 224/226/227 installations are
+not supported by this package. Do not mix their files with this installation.
+
+
+Installing the v219 data again:
+------------------------------
+
+For a fresh installation, run from the package drawer:
+
+  Execute Download-and-Install
+
+This downloads and mounts the S3 OEM v219 ISO, then runs Install-Data-219.
+Networking and C:UnZip are required. Wget and ImageMount are included.
+For an already mounted disc, run:
+
+  Execute Install-Data-219
+
+The installer refuses to overwrite an installation containing System/Engine.u.
+See INSTALL-219.txt for manual paths, disk/RAM requirements and mount details.
+INSTALACJA-219.txt contains the Polish instructions.
+Install-Data and INSTALL-200.txt describe the separate retail v200 disc route;
+use Install-Data-219 for the S3 OEM v219 disc used by this package.
+
+Updating from 1.3 or 1.4:
+-------------------------
+
+Only the executable changed. Unpack Tools/Unreal-MiniGL.zip over your
+Unreal drawer (it contains System/Unreal-MiniGL). Your Unreal-MiniGL.ini is
+kept. When updating from 1.2, also set UseWindowBrightness=True in
+[NMiniGLDrv.NMiniGLRenderDevice] to use the new brightness.
+
+Saves made with older versions may carry state written by the old
+executable (for example glitched movers or ice textures). If something
+looks wrong after loading an old save, continue from a new save.
+
+Changes in 1.4.1:
+-----------------
+
+- Fixed the hang/crash when entering Rrajigar Depths (Dug), Ruins and NaliC
+  on installations that do have Editor.u (it is on the game discs): the
+  editor package needs native classes from UnrealEd (e.g. Editor.TransBuffer)
+  that this port does not have. The Amiga build now always skips it; the
+  maps only reference stray editor textures from it.
+- F10 exit: the fullscreen game screen is moved to the back before MiniGL
+  frees its buffers, so the last frame no longer shows shifted upwards.
+- The executable identifies itself as Unreal-MiniGL 1.4.1.
+
+Changes in 1.4:
+---------------
+
+- Fixed the hang when leaving Rrajigar Mine for Rrajigar Depths (Dug), and
+  the same problem in Ruins and NaliC: these maps reference editor-only
+  textures from Editor.u, which is missing from some installations. Missing
+  import packages are now logged and ignored instead of stopping the load.
+- Fixed ice/glass textures (IceTexture, e.g. in TerraLift): their settings
+  were read 2 bytes off on 68k, so they used invalid texture pointers and
+  did not animate.
+- The Workbench pointer no longer appears over the menus while the game
+  window has focus (also in fullscreen).
+- Fixed C++ error handling in the 68k build (built without
+  -ffunction-sections), so a missing file is reported instead of crashing.
+- The executable identifies itself as Unreal-MiniGL 1.4.
+
+Changes in 1.3:
+---------------
+
+- Fixed key mapping: Shift, Alt and Ctrl no longer show up as F20-F24.
+  Caps Lock, Help, minus, apostrophe, Pause and the Amiga numeric keypad
+  are now mapped.
+- Removed the stray class name beside Start Game and the stray value beside
+  Prioritize Weapons. Hid Advanced Options, which has no panel in this port.
+- The music volume slider now works while a song is playing.
+- Fixed starting a new game when the maps are not next to the System drawer
+  (e.g. Paths on volumes such as UEGame:Maps/*.unr). The configured Paths
+  are now read correctly.
+- Brightness now scales the lighting linearly, like the software renderer,
+  instead of a gamma curve that tinted whole rooms. Works on both PiStorm3D
+  and Classic/QuarkTex and is enabled by default (UseWindowBrightness=True,
+  Brightness=0.5).
+- A crash no longer takes down the whole system: the game removes its mouse
+  input handler, logs the error to Unreal.log and exits.
+
+Changes in 1.2:
+---------------
+
+- Fixed assigning Space, Enter and letter keys in Customize Controls.
+- Removed stray values beside Crosshair and Customize Controls.
+- Added brightness correction for PiStorm3D; disabled it on Classic/QuarkTex.
+- The executable identifies itself as Unreal-MiniGL 1.2.
+
+Known issues:
+-------------
+
+- Changing the player skin in the Player menu has no visible effect.
+
+Requirements:
+-------------
+
+- AmigaOS 3.x.
+- A 68060-compatible CPU with FPU (including a suitable PiStorm setup).
+- MiniGL.library v29.1 for Pistorm 3D/Classic. WinUAE with QuarkTex.
+- Configured AHI for sound.
+
+Configuration:
+--------------
+
+Edit Unreal/System/Unreal-MiniGL.ini. The active renderer is:
+
+[Engine.Engine]
+GameRenderDevice=NMiniGLDrv.NMiniGLRenderDevice
+WindowedRenderDevice=NMiniGLDrv.NMiniGLRenderDevice
+RenderDevice=NMiniGLDrv.NMiniGLRenderDevice
+
+This package starts in a 640x480 window. Change ViewportX, ViewportY and
+StartupFullscreen in [NSDLDrv.NSDLClient] to adjust the display settings.
+Automatic timedemo is disabled (AutoTimedemo=False).
+Sound is enabled (UseSound=True); SoundDrv.NullAudioSubsystem is the name
+of this port's SDL/AHI audio driver, despite the word "Null" in its name.
+
+MiniGL renderer notes and limitations:
+-------------------------------------
+
+- This port uses the fixed-function NMiniGLDrv renderer. The MorphOS TinyGL
+  and GLES/shader renderer requirements do not apply to this package.
+- The MiniGL path in the port currently forces UseMultiTexture=False,
+  UseBGRA=False and UseHwPalette=False. Setting them to True in the INI
+  does not enable these features in this path. These are port restrictions,
+  not a claim that every MiniGL version lacks the corresponding features.
+- DetailTextures=False and NoFiltering=True are the supplied defaults.
+- Brightness scales the lightmaps linearly (0.5 = original look, 1.0 =
+  lighting x1.5). UseWindowBrightness=True enables it (the default in this
+  package); False ignores the Brightness setting.
+- Per-texture filter cache (mglfiltercache) is always enabled.
+- No numeric texture-size, texture-memory or other GL limits have been
+  verified for the user's installed MiniGL/backend. Do not assume that
+  TinyGL limits also apply to MiniGL. Actual limits depend on that backend
+  and need to be checked on the target system.
+
+
+Credits and source:
+-------------------
+
+Thanks to Northfear, BSzili and BeWorld for the earlier UE1 port work,
+the MiniGL/PiStorm3D developers, and the Amiga testers.
+Unreal and Unreal Engine are trademarks of Epic Games.
+
+Source code and build information:
+https://github.com/arczi84/UE1-68k/tree/MiniGL

@@ -29,11 +29,17 @@ if(AMIGA OR LINUX_PPC)
   list(APPEND SRC_FILES "Src/SDL12Compat.cpp")
 endif()
 
+if(AMIGA)
+  # Used only when UE_AMIGA_SMALLALLOC is defined; otherwise unreferenced.
+  list(APPEND SRC_FILES "Src/AmigaSmallAlloc.cpp")
+endif()
+
+set(UE_INTERPRETER_OPT "-Og" CACHE STRING "Optimization for the legacy script interpreter")
 if(NOT MSVC AND NOT (CMAKE_BUILD_TYPE STREQUAL "Debug"))
   # FIXME: the very funny reference juggling UE does with FFrame::Step() confuses gcc,
   # so we'll lower optimization level for the core UnrealScript interpreter for now
-  set_source_files_properties("Src/UnCorSc.cpp" PROPERTIES COMPILE_FLAGS -Og)
-  set_source_files_properties("Src/UnProp.cpp" PROPERTIES COMPILE_FLAGS -Og)
+  set_source_files_properties("Src/UnCorSc.cpp" PROPERTIES COMPILE_FLAGS "${UE_INTERPRETER_OPT} -fno-unroll-loops -fno-peel-loops -fno-web -fno-rename-registers -fno-rerun-cse-after-loop")
+  set_source_files_properties("Src/UnProp.cpp" PROPERTIES COMPILE_FLAGS "${UE_INTERPRETER_OPT} -fno-unroll-loops -fno-peel-loops -fno-web -fno-rename-registers -fno-rerun-cse-after-loop")
 endif()
 
 add_library(${PROJECT_NAME} ${LIB_TYPE} ${SRC_FILES})

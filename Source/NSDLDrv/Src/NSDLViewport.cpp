@@ -12,10 +12,6 @@ extern "C" void AmigaDebugLogf( const char* Fmt, ... );
 extern INT GAmigaStartupTraceFrames;
 extern INT GAmigaMiniGLTraceFrames;
 extern DWORD GAmigaFrameSerial;
-#ifdef AMIGA_USE_NATIVE_MINIGL
-// Log the first frames after a MiniGL mode switch (diagnoses PiStorm3D hangs).
-static INT GAmigaModeSwitchTraceFrames = 0;
-#endif
 extern "C" int AmigaRawMouseSetCapture( int Enabled );
 extern "C" int AmigaRawMouseRead( int* DX, int* DY, unsigned int* Pressed,
 	unsigned int* Released, unsigned int* Held );
@@ -176,12 +172,30 @@ void UNSDLViewport::InitKeyMap()
 	KeyMap[SDL_SCANCODE_0] = IK_0;
 	KeyMap[SDL_SCANCODE_KP_0] = IK_NumPad0;
 	KeyMap[SDL_SCANCODE_KP_PERIOD] = IK_NumPadPeriod;
+	KeyMap[SDL_SCANCODE_KP_ENTER] = IK_Enter;
+	KeyMap[SDL_SCANCODE_KP_PLUS] = IK_GreyPlus;
+	KeyMap[SDL_SCANCODE_KP_MINUS] = IK_GreyMinus;
+	KeyMap[SDL_SCANCODE_KP_MULTIPLY] = IK_GreyStar;
+	KeyMap[SDL_SCANCODE_KP_DIVIDE] = IK_GreySlash;
+	KeyMap[SDL_SCANCODE_KP_EQUALS] = IK_Equals;
+	KeyMap[SDL_SCANCODE_MINUS] = IK_Minus;
+	KeyMap[SDL_SCANCODE_APOSTROPHE] = IK_SingleQuote;
+	KeyMap[SDL_SCANCODE_PAUSE] = IK_Pause;
+	KeyMap[SDL_SCANCODE_NUMLOCKCLEAR] = IK_NumLock;
+	KeyMap[SDL_SCANCODE_SCROLLLOCK] = IK_ScrollLock;
+#ifdef PLATFORM_SDL12_COMPAT
+	KeyMap[SDLK_HELP] = IK_Help;
+#endif
 
 	INIT_KEY_RANGE( SDL_SCANCODE_1,    SDL_SCANCODE_9,    IK_1,       IK_9 );
 	INIT_KEY_RANGE( SDL_SCANCODE_A,    SDL_SCANCODE_Z,    IK_A,       IK_Z );
 	INIT_KEY_RANGE( SDL_SCANCODE_KP_1, SDL_SCANCODE_KP_9, IK_NumPad1, IK_NumPad9 );
 	INIT_KEY_RANGE( SDL_SCANCODE_F1,   SDL_SCANCODE_F12,  IK_F1,      IK_F12 );
+#ifdef PLATFORM_SDL12_COMPAT
+	INIT_KEY_RANGE( SDL_SCANCODE_F13,  SDL_SCANCODE_F15,  IK_F13,     IK_F15 );
+#else
 	INIT_KEY_RANGE( SDL_SCANCODE_F13,  SDL_SCANCODE_F24,  IK_F13,     IK_F24 );
+#endif
 
 	#undef INIT_KEY_RANGE
 }
@@ -746,11 +760,7 @@ void UNSDLViewport::Unlock( UBOOL Blit )
 					AmigaDebugLogf( "[Amiga] AUTO FIRST Viewport Unlock before native swap" );
 				}
 #endif
-				if( GAmigaModeSwitchTraceFrames > 0 )
-					AmigaMiniGLModeTrace( "frame: before swap (%d left)", GAmigaModeSwitchTraceFrames );
 				AmigaMiniGLSwapBuffers();
-				if( GAmigaModeSwitchTraceFrames > 0 )
-					AmigaMiniGLModeTrace( "frame: swapped (%d left)", GAmigaModeSwitchTraceFrames-- );
 #ifdef PLATFORM_AMIGA
 				if( GAmigaMiniGLTraceFrames > 0 )
 				{
@@ -886,29 +896,20 @@ void UNSDLViewport::SetClientSize( INT NewX, INT NewY, UBOOL UpdateProfile )
 }
 
 #ifdef AMIGA_USE_NATIVE_MINIGL
-UBOOL UNSDLViewport::RecreateNativeMiniGL( INT NewX, INT NewY, UBOOL Fullscreen )
+void UNSDLViewport::RecreateNativeMiniGL( INT NewX, INT NewY, UBOOL Fullscreen )
 {
 	guard(UNSDLViewport::RecreateNativeMiniGL);
 
-
 	const UBOOL HadRenderDevice = RenDev != NULL;
 	const UBOOL WasCaptured = MouseCaptured;
-	// Mode switches run between frames, while PiStorm3D fullscreen still holds
-	// the screen bitmap lock; release it before any other library call.
-	AmigaMiniGLReleaseDisplayLock();
-	AmigaMiniGLModeTrace( "switch: start %dx%d fs=%d -> %dx%d fs=%d (lock released)",
-		SizeX, SizeY, (INT)NativeMiniGLFullscreen, NewX, NewY, (INT)Fullscreen );
 	if( HadRenderDevice )
 		RenDev->Exit();
-	AmigaMiniGLModeTrace( "switch: renderer exited" );
 
 	AmigaMiniGLCloseWindow();
-	AmigaMiniGLModeTrace( "switch: old context closed" );
 	hWnd = NULL;
 	GLCtx = NULL;
 	if( !OpenNativeMiniGLWindow( NewX, NewY, Fullscreen ) )
 		appErrorf( "Could not recreate native MiniGL window/context at %dx%d", NewX, NewY );
-	AmigaMiniGLModeTrace( "switch: new context opened" );
 
 	hWnd = (SDL_Window*)AmigaMiniGLGetWindow();
 	GLCtx = (SDL_GLContext)1;
@@ -921,9 +922,6 @@ UBOOL UNSDLViewport::RecreateNativeMiniGL( INT NewX, INT NewY, UBOOL Fullscreen 
 	if( WasCaptured )
 		AmigaMiniGLSetPointerVisible( 0 );
 	UpdateWindow();
-	AmigaMiniGLModeTrace( "switch: renderer ready" );
-	GAmigaModeSwitchTraceFrames = 3;
-	return 1;
 
 	unguard;
 }
@@ -956,8 +954,7 @@ void UNSDLViewport::MakeFullscreen( INT NewX, INT NewY, UBOOL UpdateProfile )
 			SavedX = SizeX;
 			SavedY = SizeY;
 		}
-		if( !RecreateNativeMiniGL( NewX, NewY, true ) )
-			return;
+		RecreateNativeMiniGL( NewX, NewY, true );
 		Client->FullscreenViewport = this;
 		if( UpdateProfile )
 		{
@@ -1115,8 +1112,16 @@ void UNSDLViewport::SetMouseCapture( UBOOL Capture, UBOOL Clip, UBOOL OnlyFocus 
 		SDL_ShowCursor( SDL_DISABLE );
 	}
 #ifdef AMIGA_USE_NATIVE_MINIGL
+	// Same rule as the SDL path above: menus release capture, but the OS
+	// pointer stays hidden while our window has focus (UE1 menus are keyboard
+	// driven, and in fullscreen the pointer would sit over the menu).
 	if( NativeMiniGL )
-		AmigaMiniGLSetPointerVisible( Capture ? 0 : 1 );
+	{
+		AmigaMiniGLSetPointerVisible( (Capture || AmigaMiniGLHasFocus()) ? 0 : 1 );
+#if defined(UE_MAPCYCLE) || defined(UE_AMIGA_TRACE_ALL)
+		debugf( NAME_Log, "PointerDiag: capture=%d focus=%d -> visible=%d", (INT)Capture, AmigaMiniGLHasFocus(), (Capture || AmigaMiniGLHasFocus()) ? 0 : 1 );
+#endif
+	}
 #endif
 	// SDL's amiga_WarpWMCursor() is empty in this SDL 1.2 build. Keep SDL's
 	// grab/cursor handling, but obtain unlimited relative deltas directly from
@@ -1195,28 +1200,35 @@ UBOOL UNSDLViewport::TickInput()
 	}
 #endif
 
-	while(
-#ifdef AMIGA_USE_NATIVE_MINIGL
-		( NativeMiniGL && AmigaMiniGLPollEvent( &Ev ) ) ||
-#endif
-		SDL_PollEvent( &Ev ) )
+	for( ;; )
 	{
+#ifdef AMIGA_USE_NATIVE_MINIGL
+		const UBOOL NativeEvent = NativeMiniGL && AmigaMiniGLPollEvent( &Ev );
+		if( !NativeEvent && !SDL_PollEvent( &Ev ) )
+#else
+		if( !SDL_PollEvent( &Ev ) )
+#endif
+			break;
 		switch( Ev.type )
 		{
 			case SDL_QUIT:
+#ifdef AMIGA_USE_NATIVE_MINIGL
+				// SDL does not own this window. Ignore its synthetic quit events
+				// (including Escape); keep the native close gadget functional.
+				if( NativeMiniGL && !NativeEvent )
+					break;
+#endif
 #ifdef PLATFORM_AMIGA
 				if(
-#ifdef AMIGA_USE_NATIVE_MINIGL
-					!NativeMiniGL &&
-#endif
 					IgnoreQuitAfterEscapeUntil &&
 					(INT)(IgnoreQuitAfterEscapeUntil - SDL_GetTicks()) >= 0 )
 				{
-					IgnoreQuitAfterEscapeUntil = 0;
+					debugf( "Ignored window close immediately after Escape" );
 					break;
 				}
 #endif
 				// signal to client and remember set a flag just in case
+				debugf( "Window close accepted by input handler" );
 				QuitRequested = true;
 				return true;
 #ifndef PLATFORM_SDL12_COMPAT
@@ -1233,9 +1245,6 @@ UBOOL UNSDLViewport::TickInput()
 			case SDL_KEYDOWN:
 #ifdef PLATFORM_AMIGA
 				if(
-#ifdef AMIGA_USE_NATIVE_MINIGL
-					!NativeMiniGL &&
-#endif
 					Ev.key.keysym.sym == SDLK_ESCAPE )
 					IgnoreQuitAfterEscapeUntil = SDL_GetTicks() + 500;
 #endif
@@ -1245,9 +1254,19 @@ UBOOL UNSDLViewport::TickInput()
 					break;
 				}
 #ifdef PLATFORM_SDL12_COMPAT
+				{
 				// SDL 1.2 has no SDL_TEXTINPUT; deliver printable characters
 				// from the key event's unicode field instead.
-				if( Ev.type == SDL_KEYDOWN )
+				// KeyMenuing needs the physical key name (Space, Enter, etc.).
+				// KeyType would pass Chr(Key) and leave KeyMenuing before the
+				// mapped press arrives, attempting to bind " " instead of Space.
+				// Inspect the current state for each event: Enter can start key
+				// capture earlier in this same input polling loop.
+				const UBOOL bAssigningKey = Console &&
+					((UObject*)Console)->GetMainFrame() &&
+					((UObject*)Console)->GetMainFrame()->StateNode &&
+					((UObject*)Console)->GetMainFrame()->StateNode->GetFName() == "KeyMenuing";
+				if( Ev.type == SDL_KEYDOWN && !bAssigningKey )
 				{
 					Uint16 U = Ev.key.keysym.unicode;
 					// Some Amiga SDL keyboard drivers leave unicode at zero
@@ -1259,6 +1278,7 @@ UBOOL UNSDLViewport::TickInput()
 					if( U < 128 && ( isprint( U ) || U == '\r' ) )
 						Client->Engine->Key( this, (EInputKey)U );
 				}
+				}
 #endif
 			case SDL_KEYUP:
 #ifdef PLATFORM_SDL12_COMPAT
@@ -1266,7 +1286,8 @@ UBOOL UNSDLViewport::TickInput()
 				// InitKeyMap() above is deliberately indexed by SDLKey/SDLK_*.
 				// Using scancode made Escape and most gameplay keys become unrelated
 				// Unreal keys on Amiga.
-				CauseInputEvent( KeyMap[Ev.key.keysym.sym], ( Ev.type == SDL_KEYDOWN ) ? IST_Press : IST_Release );
+				if( (unsigned)Ev.key.keysym.sym < sizeof(KeyMap) && KeyMap[Ev.key.keysym.sym] )
+					CauseInputEvent( KeyMap[Ev.key.keysym.sym], ( Ev.type == SDL_KEYDOWN ) ? IST_Press : IST_Release );
 #else
 				CauseInputEvent( KeyMap[Ev.key.keysym.scancode], ( Ev.type == SDL_KEYDOWN ) ? IST_Press : IST_Release );
 #endif

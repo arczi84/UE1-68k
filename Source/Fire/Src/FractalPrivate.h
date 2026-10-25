@@ -497,7 +497,7 @@ class DLL_EXPORT UIceTexture : public UFractalTexture
 	DECLARE_CLASS_WITHOUT_CONSTRUCT(UIceTexture,UFractalTexture,0)
 
 	// Persistent variables.
-    UTexture*   GlassTexture;
+    UTexture*   GlassTexture GCC_ALIGN(4); // m68k: match the script's 4-byte layout (cf. Fire/Water).
     UTexture*   SourceTexture;
     BYTE        PanningStyle;
 	BYTE        TimeMethod;
@@ -506,7 +506,7 @@ class DLL_EXPORT UIceTexture : public UFractalTexture
 	BYTE        Frequency;
 	BYTE        Amplitude;
 
-	DWORD       MoveIce:1;   // Mirrored as BOOLEAN in C++
+	DWORD       MoveIce:1 GCC_PACK(4);   // Mirrored as BOOLEAN in C++
 	FLOAT       MasterCount;
 	FLOAT       UDisplace;
 	FLOAT 		VDisplace;

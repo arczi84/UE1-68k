@@ -1,8 +1,11 @@
 /* Optional GL hooks required by SDL's CyberGraphX video driver. The native
  * MiniGL build never asks SDL for an OpenGL mode, so these remain inert. */
 /* This SDL_mixer archive was built against a libc exposing errno as a global;
- * libnix uses an accessor macro, so provide the ABI slot the archive expects. */
+ * libnix uses an accessor macro, so provide the ABI slot the archive expects.
+ * clib2 already defines the global. */
+#ifndef __CLIB2__
 int errno;
+#endif
 
 int CGX_GL_Init( void* Device ) { (void)Device; return -1; }
 void CGX_GL_Quit( void* Device ) { (void)Device; }

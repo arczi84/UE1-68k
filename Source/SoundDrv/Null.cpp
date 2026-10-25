@@ -281,6 +281,15 @@ void UNullAudioSubsystem::UnregisterSound(USound* Sound)
 	unguard;
 }
 
+// The menu slider changes MusicVolume through "set ini:"; remember what was
+// given to libmodplug so Update() can apply a change while a song plays.
+static INT GAppliedMusicVolume = -1;
+static void ApplyMusicVolume(ModPlugFile* File, BYTE Volume)
+{
+	ModPlug_SetMasterVolume(File,Clamp((INT)Volume*2,1,512));
+	GAppliedMusicVolume = Volume;
+}
+
 void UNullAudioSubsystem::RegisterMusic(UMusic* InMusic)
 {
 	guard(UNullAudioSubsystem::RegisterMusic);
@@ -298,7 +307,7 @@ void UNullAudioSubsystem::RegisterMusic(UMusic* InMusic)
 	{
 		InMusic->Handle=MusicFile;
 		MusicLoaded=true;
-		ModPlug_SetMasterVolume(MusicFile,Clamp((INT)MusicVolume*2,1,512));
+		ApplyMusicVolume(MusicFile,MusicVolume);
 	}
 	SDL_UnlockAudio();
 	if(!MusicFile)
@@ -387,7 +396,7 @@ void UNullAudioSubsystem::StartMusic()
 		return;
 	SDL_LockAudio();
 	ModPlug_SeekOrder(MusicFile,MusicSection);
-	ModPlug_SetMasterVolume(MusicFile,Clamp((INT)MusicVolume*2,1,512));
+	ApplyMusicVolume(MusicFile,MusicVolume);
 	MusicRingRead=0;
 	MusicRingWrite=0;
 	MusicRingCount=0;
@@ -628,6 +637,12 @@ void UNullAudioSubsystem::Update(FPointRegion Region, FCoords& Listener)
 			RegisterMusic(Music);
 		if(Music->Handle)
 			StartMusic();
+	}
+	if(MusicFile && MusicLoaded && (INT)MusicVolume!=GAppliedMusicVolume)
+	{
+		SDL_LockAudio();
+		ApplyMusicVolume(MusicFile,MusicVolume);
+		SDL_UnlockAudio();
 	}
 	FillMusicBuffer();
 	if(!MusicMixReported && MusicMixCalls>=8)

@@ -223,6 +223,7 @@ char* appUnixPath( const char* Path );
 #define _utime utime
 #define _stat stat
 #define _isnan(x) isnan(x)
+#include <string.h> // before the stricmp macros: newer libnix declares them
 #define stricmp(x, y) strcasecmp((x), (y))
 #define strnicmp(x, y, n) strncasecmp((x), (y), (n))
 #define _strnicmp(x, y, n) strncasecmp((x), (y), (n))
