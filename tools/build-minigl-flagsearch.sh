@@ -4,9 +4,14 @@
 #      UE_LEVEL (-O level digit), UE_OPT (-f flags; explicit -f wins over -O
 #      regardless of order), UE_INTERPRETER_OPT,
 #      UE_NAME (build dir suffix), UE_CPU, UE_EXTRA_FLAGS, UE_EXTRA_CMAKE,
-#      UE_STRIP (--strip-debug keeps symbols for the sampling profiler).
+#      UE_STRIP (--strip-debug keeps symbols for the sampling profiler),
+#      UE_ROOT (source checkout; default UE1-MiniGL), UE_BUILD_ROOT (where
+#      fs-NAME / sdk-fs-* go; default UE_ROOT/build), UE_SDK_TEMPLATE (v29
+#      SDK include tree prepared by prepare-minigl-v29-sdk.sh).
 set -euo pipefail
-ue_root=/mnt/d/dev/UE1-MiniGL
+ue_root=${UE_ROOT:-/mnt/d/dev/UE1-MiniGL}
+ue_build_root=${UE_BUILD_ROOT:-$ue_root/build}
+ue_sdk_template=${UE_SDK_TEMPLATE:-/mnt/d/dev/UE1-MiniGL/build/sdk-minigl-v29-gcc65}
 tc=${UE_TC:-/opt/amiga-gcc65-250215}
 crt=${UE_CRT:--noixemul}
 opt=${UE_OPT:--ffast-math}
@@ -14,11 +19,11 @@ level=${UE_LEVEL:-3}
 cpu=${UE_CPU:-68060}
 name=${UE_NAME:?set UE_NAME}
 ue_src="${UE_SOURCE:-$ue_root/build/src-v29-lightscale/Source}"
-ue_build="$ue_root/build/fs-$name"
-ue_sdk="$ue_root/build/sdk-fs-$(basename "$tc")${crt// /}-$cpu"
+ue_build="$ue_build_root/fs-$name"
+ue_sdk="$ue_build_root/sdk-fs-$(basename "$tc")${crt// /}-$cpu"
 mkdir -p "$ue_sdk/libraryroot" "$ue_sdk/backend" "$ue_sdk/obj"
-cp -a "$ue_root/build/sdk-minigl-v29-gcc65/libraryroot/include" "$ue_sdk/libraryroot/"
-cp -a "$ue_root/build/sdk-minigl-v29-gcc65/backend/include" "$ue_sdk/backend/"
+cp -a "$ue_sdk_template/libraryroot/include" "$ue_sdk/libraryroot/"
+cp -a "$ue_sdk_template/backend/include" "$ue_sdk/backend/"
 ue_vendor=/mnt/d/dev/Pistorm3D/MiniGL_Classic_v29.1
 "$tc/bin/m68k-amigaos-gcc" $crt -m$cpu -mhard-float -O2 -g0 -I"$ue_sdk/libraryroot/include" \
   -c "$ue_vendor/libraryroot/client/minigl_base.c" -o "$ue_sdk/obj/minigl_base.o"
