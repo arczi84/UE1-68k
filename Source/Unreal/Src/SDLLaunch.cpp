@@ -21,6 +21,9 @@ extern "C" {HINSTANCE hInstance;}
 extern "C" {char GCC_HIDDEN THIS_PACKAGE[64]="Launch";}
 #ifdef PLATFORM_AMIGA
 extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+// AmigaSplash.c: loading splash, closed when the first viewport opens.
+extern "C" void AmigaSplashOpen( int argc, const char** argv );
+extern "C" void AmigaSplashClose( void );
 #ifdef AMIGA_USE_MINIGL
 extern "C" void AmigaCenterSDLWindow( void );
 #ifdef UE_AMIGA_PROF_INI
@@ -184,6 +187,10 @@ void HandleError()
 	GObj.ShutdownAfterError();
 	debugf( NAME_Exit, "Exiting due to exception" );
 	GErrorHist[ARRAY_COUNT(GErrorHist)-1]=0;
+#ifdef PLATFORM_AMIGA
+	// A load error happens while the splash is still up; don't hide the requester.
+	AmigaSplashClose();
+#endif
 	SDL_ShowSimpleMessageBox( SDL_MESSAGEBOX_ERROR, LocalizeError("Critical"), GErrorHist, SDL_GetKeyboardFocus() );
 }
 
@@ -493,6 +500,7 @@ static void AmigaTerminateHandler()
 	SDL_PauseAudio( 1 );
 	SDL_CloseAudio();
 	AmigaRawMouseShutdown();
+	AmigaSplashClose();
 	if( GAmigaEmergencyCloseWindow )
 		GAmigaEmergencyCloseWindow();
 	SDL_Quit();
@@ -831,7 +839,11 @@ int main( int argc, const char** argv )
 #else
 	AmigaDebugLog( "[Amiga] Native MiniGL: SDL window/context bootstrap bypassed" );
 #endif
+	// Opened after the early SDL window (non-native builds) so it stays in
+	// front; UNSDLViewport::OpenWindow closes it once loading is done.
+	AmigaSplashOpen( argc, argv );
 	const int Result = AmigaRunWithStack( argc, argv, &UnrealMain );
+	AmigaSplashClose();
 #ifndef AMIGA_USE_MINIGL
 	if( GAmigaUseOpenGL )
 	{

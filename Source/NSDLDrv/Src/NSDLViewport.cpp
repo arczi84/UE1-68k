@@ -9,6 +9,7 @@
 
 #ifdef PLATFORM_AMIGA
 extern "C" void AmigaDebugLogf( const char* Fmt, ... );
+extern "C" void AmigaSplashClose( void );
 extern INT GAmigaStartupTraceFrames;
 extern INT GAmigaMiniGLTraceFrames;
 extern DWORD GAmigaFrameSerial;
@@ -388,6 +389,11 @@ void UNSDLViewport::OpenWindow( void* InParentWindow, UBOOL Temporary, INT NewX,
 	}
 	else
 	{
+#ifdef PLATFORM_AMIGA
+		// Loading is finished: remove the startup splash before the game
+		// window/screen (MiniGL, OpenGL or software) is opened.
+		AmigaSplashClose();
+#endif
 #ifdef AMIGA_USE_NATIVE_MINIGL
 		// Renderer changes must also preserve the GL-before-window destruction
 		// order. This supports the existing MiniGL/SoftDrv menu without ever
