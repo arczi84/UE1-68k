@@ -4,7 +4,7 @@
 #      UE_LEVEL (-O level digit), UE_OPT (-f flags; explicit -f wins over -O
 #      regardless of order), UE_INTERPRETER_OPT,
 #      UE_NAME (build dir suffix), UE_CPU, UE_EXTRA_FLAGS, UE_EXTRA_CMAKE,
-#      UE_STRIP (--strip-debug keeps symbols for the sampling profiler),
+#      UE_EXTRA_LINK_FLAGS, UE_STRIP (--strip-debug keeps symbols for the sampling profiler),
 #      UE_ROOT (source checkout; default UE1-MiniGL), UE_BUILD_ROOT (where
 #      fs-NAME / sdk-fs-* go; default UE_ROOT/build), UE_SDK_TEMPLATE (v29
 #      SDK include tree prepared by prepare-minigl-v29-sdk.sh).
@@ -34,7 +34,7 @@ ue_vendor=/mnt/d/dev/Pistorm3D/MiniGL_Classic_v29.1
 rm -f "$ue_sdk/libraryroot/libminigl_dispatch.a"
 "$tc/bin/m68k-amigaos-ar" rcs "$ue_sdk/libraryroot/libminigl_dispatch.a" "$ue_sdk/obj/"*.o
 ue_flags="$crt -m$cpu -mhard-float -fomit-frame-pointer -fno-PIC -fno-pic -DUE_DISABLE_RENDER_TIMING -DUE_MINIGL_HASHCACHE -DUE_MINIGL_READCACHE -DUE_MINIGL_STABLE_BASELINE -g0 -DUE_RELEASE_PACKAGE $opt ${UE_EXTRA_FLAGS:-}"
-ue_link="$crt -m$cpu -mhard-float -Wl,${UE_STRIP:---strip-all} -Wl,-Map=$ue_build/Unreal/Unreal.map"
+ue_link="$crt -m$cpu -mhard-float -Wl,${UE_STRIP:---strip-all} -Wl,-Map=$ue_build/Unreal/Unreal.map ${UE_EXTRA_LINK_FLAGS:-}"
 if [[ $("$tc/bin/m68k-amigaos-g++" -dumpversion) == 6* ]]; then
   ue_link="$ue_link -L/opt/amiga-gcc65-250215/m68k-amigaos/lib"
 else
