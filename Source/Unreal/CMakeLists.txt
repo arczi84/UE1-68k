@@ -9,7 +9,8 @@ endif()
 if(AMIGA)
   # Large swapped stack for UE's deep recursion (see AmigaStack.c). Kept a .c
   # file so exec/types.h doesn't collide with the engine's BYTE/WORD typedefs.
-  list(APPEND SRC_FILES "Src/AmigaStack.c" "Src/AmigaRawMouse.c" "Src/AmigaTimerDiag.c")
+  list(APPEND SRC_FILES "Src/AmigaStack.c" "Src/AmigaRawMouse.c" "Src/AmigaTimerDiag.c"
+    "Src/AmigaSplash.c")
   if(AMIGA_GL_BACKEND STREQUAL "MiniGL")
     list(APPEND SRC_FILES "Src/SDLAmigaNoGL.c")
   endif()
