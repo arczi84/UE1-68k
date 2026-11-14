@@ -22,7 +22,12 @@
 #define INTUITION_BASE_NAME SplashIntuitionBase
 static struct IntuitionBase* SplashIntuitionBase = NULL;
 #include <proto/intuition.h>
+/* SDK inline headers differ in the macro name (bebbo/NDK: CYBERGRAPHICS_BASE_NAME,
+ * older: CYBERGFX_BASE_NAME).  Define both: if the wrong one is picked the
+ * calls go through SDL's global CyberGfxBase, which is NULL in native MiniGL
+ * builds (GetCyberMapAttr -> jsr -96(a6=0) -> illegal instruction). */
 #define CYBERGFX_BASE_NAME SplashCyberGfxBase
+#define CYBERGRAPHICS_BASE_NAME SplashCyberGfxBase
 static struct Library* SplashCyberGfxBase = NULL;
 #include <proto/cybergraphics.h>
 
